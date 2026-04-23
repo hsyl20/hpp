@@ -65,6 +65,15 @@ remove_comments = T.over T.config (T.setL C.eraseCCommentsL True)
 remove_line :: HppState -> HppState
 remove_line = T.over T.config (T.setL C.inhibitLinemarkersL True)
 
+-- | Pass unknown @#@-directives through as plain text instead of
+-- raising an error.
+ignoreUnknown :: HppState -> HppState
+ignoreUnknown = T.over T.config (T.setL C.ignoreUnknownDirectivesL True)
+
+-- | Treat Haskell comments as opaque when looking for directives.
+haskellComments :: HppState -> HppState
+haskellComments = T.over T.config (T.setL C.ignoreHaskellCommentsL True)
+
 add_definition :: ByteString -> ByteString -> HppState -> HppState
 add_definition k v s = fromMaybe (error "Preprocessor definition did not parse")
                                  (addDefinition k v s)
@@ -268,6 +277,84 @@ tests =
             , "13: 13: aaaa\n"
             , "#line 17\n"
             ]
+
+  -- ignoreUnknownDirectives: unknown '#'-commands pass through unchanged
+  -- (mirrors -traditional-cpp's permissive handling of Haskell pragmas
+  -- whose closing @#-}@ lands on its own line).
+  , hppHelper (ignoreUnknown $ remove_line emptyHppState)
+            [ "before"
+            , "  #-}"
+            , "after"
+            ]
+            [ "before\n"
+            , "  #-}\n"
+            , "after\n"
+            , "\n"
+            ]
+
+  -- Known directives are still processed when the option is on.
+  , hppHelper (ignoreUnknown $ remove_line $ add_definition "FOO" "1" emptyHppState)
+            sourceIfdef ["x = 42\n","\n"]
+
+  -- ignoreHaskellComments: the closing brace of a multi-line Haskell
+  -- pragma ('  #-}') begins inside an open '{-' block comment. The
+  -- gating pass demotes the leading '#' token so directive dispatch
+  -- skips it, and the bytes are emitted unchanged.
+  , hppHelper (haskellComments $ remove_line emptyHppState)
+            [ "{-# LANGUAGE CPP"
+            , "           , OverloadedStrings"
+            , "  #-}"
+            , "module M where"
+            , "x = 1"
+            ]
+            [ "{-# LANGUAGE CPP\n"
+            , "           , OverloadedStrings\n"
+            , "  #-}\n"
+            , "module M where\n"
+            , "x = 1\n"
+            , "\n"
+            ]
+
+  -- Nested block comments are tracked: an inner '{-' inside an outer
+  -- '{-' bumps the depth so a single '-}' stays inside the outermost
+  -- comment and the '#-}' line remains gated.
+  , hppHelper (haskellComments $ remove_line emptyHppState)
+            [ "{- outer {- inner"
+            , "  #-}"
+            , "  still in outer -}"
+            , "-}"
+            , "x = 1"
+            ]
+            [ "{- outer {- inner\n"
+            , "  #-}\n"
+            , "  still in outer -}\n"
+            , "-}\n"
+            , "x = 1\n"
+            , "\n"
+            ]
+
+  -- A '{-' appearing inside a string literal should not open a
+  -- Haskell block comment, so the directive that follows is still
+  -- dispatched normally.
+  , hppHelper (haskellComments $ add_definition "FOO" "1"
+               $ remove_line emptyHppState)
+            [ "s = \"{- not a comment -}\""
+            , "#ifdef FOO"
+            , "y = 42"
+            , "#endif"
+            ]
+            [ "s = \"{- not a comment -}\"\n"
+            , "y = 42\n"
+            , "\n"
+            ]
+
+  -- Outside a Haskell block comment, a regular '#'-prefixed line is
+  -- still dispatched as a directive even with ignoreHaskellComments
+  -- on. (Sanity check: the gate only fires on lines that begin inside
+  -- an open block comment.)
+  , hppHelper (haskellComments $ remove_line
+               $ add_definition "FOO" "1" emptyHppState)
+            sourceIfdef ["x = 42\n","\n"]
 
   ]
 
