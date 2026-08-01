@@ -4,9 +4,8 @@
 module Hpp.Tokens (Token(..), detok, isImportant, notImportant, importants,
                    trimUnimportant, detokenize, tokenize, newLine,
                    skipLiteral) where
-import Control.Arrow (first, second)
-import Data.Char (isAlphaNum, isDigit, isSpace, isOctDigit, isHexDigit, digitToInt)
-import Data.Foldable (foldl')
+import Control.Arrow (first)
+import Data.Char (isAlphaNum, isDigit, isSpace)
 #if __GLASGOW_HASKELL__ < 808
 import Data.Monoid ((<>))
 #endif
@@ -62,16 +61,21 @@ newLine _ = False
 maybeImp :: Stringy s => s -> [Token s]
 maybeImp s = if isEmpty s then [] else [Important s]
 
-digitsFromBase :: Stringy s => Int -> s -> s
-digitsFromBase base = fromString . show . foldl' aux 0 . map digitToInt . toChars
-  where aux acc d = base * acc + d
-
-escapeChar :: Stringy s => Char -> Maybe s
-escapeChar = fmap fromString . flip lookup lut
-  where lut = map (second (show :: Int -> String))
-                  [ ('a', 0x07), ('b', 0x08), ('f', 0x0C), ('n', 0x0A)
-                  , ('r', 0x0D), ('t', 0x09), ('v', 0x0B), ('\\', 0x5C)
-                  , ('\'', 0x27), ('"', 0x22), ('?', 0x3F) ]
+-- Note [Character escapes stay as written]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- A C character constant has an integer value, and this tokenizer used to
+-- substitute it: '\\n' became 10, '\\\\' became 92. Harmless when the output
+-- goes to a C compiler, and wrong when it does not -- Haskell sources go
+-- through the same preprocessor, and there
+--
+--     showLitChar c s = showChar '\\\\' (protectEsc isDec (shows (ord c)) s)
+--
+-- comes out as @showChar 92@, which fails to typecheck with "No instance for
+-- Num Char". ghc-internal's GHC.Internal.Show is a real example.
+--
+-- The value is only ever needed to evaluate an #if, so the escape is decoded
+-- there instead, in 'Hpp.Expr.readNarrowChar', and the token keeps the text it
+-- was written with.
 
 data TokChar = TokSpace Char | TokQuote | TokDQuote
 
@@ -104,18 +108,16 @@ tokWords s =
                       Just (_,esc', pos'')
                         | isEmpty esc' ->
                           Important pre : Important ("'\\\''") : tokWords pos''
-                          -- Important (fromJust $ escapeChar '\'') : tokWords pos''
                       _ -> [Important (pre' <> pos)]
                   | otherwise ->
-                  let esc' = if sall isOctDigit esc
-                             then Important (digitsFromBase 8 esc)
-                             else case esc of
-                                    'x' :. hs
-                                      | sall isHexDigit hs ->
-                                      Important (digitsFromBase 16 hs)
-                                    (escapeChar -> Just e) :. Nil -> Important e
-                                    _ -> Important ("'\\" <> snoc esc '\'')
-                  in  maybeImp pre ++ esc' : tokWords pos'
+                  -- The literal is passed through as written. It used to be
+                  -- rewritten to the escape's numeric value here, which is what
+                  -- a C compiler would eventually see -- but the input may be
+                  -- Haskell, where showChar '\\' must not become showChar 92.
+                  -- Decoding an escape is #if's business, and 'Hpp.Expr' does
+                  -- it there; see Note [Character escapes stay as written].
+                  maybeImp pre
+                    ++ Important ("'\\" <> snoc esc '\'') : tokWords pos'
             c:.('\'':.cs) -> maybeImp pre
                                 ++ Important (fromString ['\'', c, '\''])
                                 : tokWords cs

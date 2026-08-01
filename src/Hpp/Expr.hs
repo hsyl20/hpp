@@ -6,10 +6,9 @@ module Hpp.Expr (Expr(..), readLitInt, parseExpr, renderExpr, evalExpr) where
 import Control.Applicative
 import Control.Monad ((>=>))
 import Data.Bits (complement, (.&.), (.|.), xor, shiftL, shiftR)
-import Data.List (foldl')
 import Text.Read (readMaybe)
 import Hpp.Tokens
-import Data.Char (digitToInt, toLower)
+import Data.Char (digitToInt, isHexDigit, isOctDigit, toLower)
 import Data.Proxy (Proxy(..))
 import Data.Bifunctor (bimap)
 import Data.Bits (Bits)
@@ -241,9 +240,35 @@ readWideChar ('L':'\'':cs0) = go 0 cs0
         go _ [] = Nothing
 readWideChar _ = Nothing
 
+-- | A single-character constant, escape sequences included.
+--
+-- The tokenizer passes character literals through as written -- see Note
+-- [Character escapes stay as written] in "Hpp.Tokens" -- so decoding them is
+-- this module's job, and only matters when an #if mentions one.
 readNarrowChar :: String -> Maybe Char
-readNarrowChar ['\'',c,'\''] = Just c
+readNarrowChar "'\\''"        = Just '\''
+readNarrowChar ['\'',c,'\''] | c /= '\\' = Just c
+readNarrowChar ('\'':'\\':rest)
+  | not (null rest), last rest == '\'' = readEscape (init rest)
 readNarrowChar _ = Nothing
+
+readEscape :: String -> Maybe Char
+readEscape [c]
+  | Just v <- lookup c simpleEscapes = Just (toEnum v)
+readEscape ('x':hs)
+  | not (null hs), all isHexDigit hs = Just (toEnum (fromBase 16 hs))
+readEscape ds
+  | not (null ds), all isOctDigit ds = Just (toEnum (fromBase 8 ds))
+readEscape _ = Nothing
+
+fromBase :: Int -> String -> Int
+fromBase b = foldl (\acc d -> b * acc + digitToInt d) 0
+
+simpleEscapes :: [(Char, Int)]
+simpleEscapes =
+  [ ('a', 0x07), ('b', 0x08), ('f', 0x0C), ('n', 0x0A), ('r', 0x0D)
+  , ('t', 0x09), ('v', 0x0B), ('\\', 0x5C), ('\'', 0x27), ('"', 0x22)
+  , ('?', 0x3F), ('0', 0x00) ]
 
 parseLit :: String -> Maybe Lit
 parseLit s = case readLitInt s of
