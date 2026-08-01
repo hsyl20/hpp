@@ -185,12 +185,38 @@ cCommentRemoval' do_trigraphs =
 -- expander, both of which only consume 'Important' tokens, are
 -- redirected past the region.
 
+-- Note [A pragma is not a comment]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- GHC's lexer opens a block comment on @{-@ and a pragma on @{-#@, and the
+-- difference matters to macro expansion. ghc-internal's CTypes.h defines
+--
+--     #define INTEGRAL_TYPE(T,THE_CTYPE,B) \\
+--     newtype {-# CTYPE THE_CTYPE #-} T = T B ...
+--
+-- whose body lies entirely inside @{-# … #-}@. Gated as a comment, THE_CTYPE
+-- is demoted, the parameter never substitutes, and the literal identifier
+-- reaches the output -- a parse error in Foreign.C.Types.
+--
+-- So a pragma gets a state of its own, and that state is not opaque: tokens
+-- inside it expand as ordinary code. What the state is still for is the
+-- multi-line case,
+--
+--     {-# LANGUAGE CPP
+--                , OverloadedStrings
+--       #-}
+--
+-- where the closing line begins with @#@ and would otherwise be dispatched as
+-- a directive. 'gateHaskellComments' demotes the first token of a line that
+-- starts inside a pragma, which stops the dispatch and leaves the rest of the
+-- line expandable.
+
 -- | Lexical states tracked by 'gateHaskellComments'.
 data HsLex = HsCode
            | HsBlockCmt {-# UNPACK #-} !Int
            | HsLineCmt
            | HsString
            | HsMultiString
+           | HsPragma
   deriving (Eq, Show)
 
 -- | See Note [Treating Haskell comments and strings as opaque to CPP].
@@ -208,8 +234,17 @@ gateHaskellComments = go HsCode
           -- break, so any HsLineCmt state at end-of-line resets to
           -- HsCode for the following line.
           stNext = case stEnd of HsLineCmt -> HsCode; s -> s
-          ln'    = demoteTokens trace ln
+          -- See Note [A pragma is not a comment]: a continuation line of a
+          -- pragma must not have its leading '#' taken for a directive.
+          ln'    = gateLeadingHash st (demoteTokens trace ln)
       in ln' : go stNext lns
+
+    gateLeadingHash HsPragma ts = case break isImportant' ts of
+      (pre, Important t : rest) -> pre ++ Other t : rest
+      _ -> ts
+      where isImportant' (Important _) = True
+            isImportant' _             = False
+    gateLeadingHash _ ts = ts
 
     -- Walk the line's character stream, recording every state
     -- transition as @(positionAfter, newState)@. The list always
@@ -220,6 +255,12 @@ gateHaskellComments = go HsCode
     walkTraced st0 cs = (0, st0) : aux st0 0 cs
       where
         aux _ _ []                                = []
+        -- See Note [A pragma is not a comment].
+        aux HsCode pos ('{':'-':'#':rest)         =
+          (pos+3, HsPragma) : aux HsPragma (pos+3) rest
+        aux HsPragma pos ('#':'-':'}':rest)       =
+          (pos+3, HsCode) : aux HsCode (pos+3) rest
+        aux HsPragma pos (_:rest)                 = aux HsPragma (pos+1) rest
         aux HsCode pos ('{':'-':rest)             =
           (pos+2, HsBlockCmt 1) : aux (HsBlockCmt 1) (pos+2) rest
         aux HsCode pos ('-':'-':rest)             =
@@ -311,6 +352,8 @@ gateHaskellComments = go HsCode
     isOpaque HsString       = True
     isOpaque HsMultiString  = True
     isOpaque HsCode         = False
+    -- See Note [A pragma is not a comment].
+    isOpaque HsPragma       = False
 
 prepareInput :: (Monad m, HasHppState m) => m ([String] -> [[TOKEN]])
 prepareInput =
