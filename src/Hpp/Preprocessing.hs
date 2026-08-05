@@ -9,6 +9,7 @@ module Hpp.Preprocessing
   , cCommentAndTrigraph
   , gateHaskellComments
   , prepareInput
+  , prepareInputFor
   ) where
 import Control.Arrow (first)
 import Data.Char (isSpace)
@@ -360,9 +361,31 @@ gateHaskellComments = go HsCode
     isOpaque HsPragma       = False
 
 prepareInput :: (Monad m, HasHppState m) => m ([String] -> [[TOKEN]])
-prepareInput =
+prepareInput = getL config <$> getState >>= prepareInputWith
+
+-- | As 'prepareInput', but for a file that has not been entered yet.
+--
+-- Note [Preparing a file names that file]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- The preparation passes emit line markers of their own -- a multi-line block
+-- comment is replaced by one -- and a marker carries a file name. The pass for
+-- an included file is built by 'Hpp.Directive.includeAux' *before*
+-- 'streamNewFile' has made that file current, so asking the state for the name
+-- gives the name of the file containing the @#include@.
+--
+-- The line numbers were right and the name was wrong, which is the worst
+-- combination: @MachDeps.h@'s first comment came out as
+-- @{-# LINE 15 \"GHC/Types.hs\" #-}@, pointing fifteen lines into a file whose
+-- line 877 we were standing on.
+prepareInputFor :: (Monad m, HasHppState m)
+                => FilePath -> m ([String] -> [[TOKEN]])
+prepareInputFor fp =
   do cfg <- getL config <$> getState
-     let gate | ignoreHaskellComments cfg = gateHaskellComments
+     prepareInputWith (cfg { curFileNameF = pure fp })
+
+prepareInputWith :: Monad m => Config -> m ([String] -> [[TOKEN]])
+prepareInputWith cfg =
+  do let gate | ignoreHaskellComments cfg = gateHaskellComments
               | otherwise                 = id
      -- The two fast paths below bake in '//' removal and C-syntax line
      -- markers, so they are only applicable when both are wanted. See

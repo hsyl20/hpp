@@ -82,6 +82,9 @@ parseArgs cfg0 = go emptyEnv id cfg0 Nothing . concatMap breakEqs
         -- are erased either way. See 'eraseCLineCommentsF'.
         go env acc cfg out ("--fno-line-comments":rst) =
           go env acc (cfg { eraseCLineCommentsF = Just False }) out rst
+        -- See 'ignoreHaskellCommentsF'.
+        go env acc cfg out ("--fhaskell-comments":rst) =
+          go env acc (cfg { ignoreHaskellCommentsF = Just True }) out rst
         go env acc cfg out ("--freplace-trigraphs":rst) =
           go env acc (cfg { replaceTrigraphsF = Just True }) out rst
         go env acc cfg out ("--only-macros":rst) =

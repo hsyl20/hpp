@@ -7,13 +7,13 @@ import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.State.Strict (StateT)
-import Hpp.Conditional (dropBranch, takeBranch)
+import Hpp.Conditional (dropBranch, takeBranch, yieldLineNum)
 import Hpp.Config (curFileName, curFileNameF, ignoreUnknownDirectives)
 import Hpp.Env (lookupKey, deleteKey, insertPair)
 import Hpp.Expansion (expandLineState)
 import Hpp.Expr (evalExpr, parseExpr)
 import Hpp.Macro (parseDefinition)
-import Hpp.Preprocessing (prepareInput)
+import Hpp.Preprocessing (prepareInputFor)
 import Hpp.StringSig (unquote, toChars, uncons)
 import Hpp.Tokens (newLine, notImportant, trimUnimportant, detokenize, isImportant, Token(..))
 import Hpp.Types
@@ -68,21 +68,50 @@ droppingSpaces = droppingWhile notImportant
 streamNewFile :: (Monad m, HasHppState m)
               => FilePath -> [[TOKEN]] -> Parser m [TOKEN] ()
 streamNewFile fp s =
-  do (oldCfg,oldDir,oldLine) <- do st <- getState
-                                   let cfg    = hppConfig st
-                                       cfg'   = cfg { curFileNameF = pure fp }
-                                       oldDir = hppCurDir st
-                                       ln     = hppLineNum st
-                                       newDir = takeDirectory fp
-                                   setState (st { hppConfig  = cfg'
-                                                , hppCurDir  = newDir
-                                                , hppLineNum = 1
-                                                })
-                                   return (cfg, oldDir, ln)
+  do (oldCfg,newCfg,oldDir,oldLine) <-
+       do st <- getState
+          let cfg    = hppConfig st
+              cfg'   = cfg { curFileNameF = pure fp }
+              oldDir = hppCurDir st
+              ln     = hppLineNum st
+              newDir = takeDirectory fp
+          setState (st { hppConfig  = cfg'
+                       , hppCurDir  = newDir
+                       , hppLineNum = 1
+                       })
+          return (cfg, cfg', oldDir, ln)
+     -- See Note [An include is two line markers, not none].
      insertInputSegment
-       s (getState >>= setState . setL lineNum oldLine
-                                . setL config oldCfg
-                                . setL dir oldDir)
+       (yieldLineNum newCfg 1 : s ++ [yieldLineNum oldCfg oldLine])
+       (getState >>= setState . setL lineNum oldLine
+                              . setL config oldCfg
+                              . setL dir oldDir)
+
+-- Note [An include is two line markers, not none]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Splicing a file's contents into another moves every following line, so
+-- whoever reads the output has to be told twice: once on the way in, that what
+-- follows is line 1 of the included file, and once on the way out, that what
+-- follows is where we were in the including one.
+--
+-- Neither was emitted. A marker appeared only where a conditional happened to
+-- produce one, so an @#include@ of a header with no @#if@ in it moved
+-- everything below by the size of the header and said nothing; and an
+-- @#include@ of a header that did have one left the reader believing it was
+-- still inside the header for the rest of the outer file. In
+--
+--     module M2 where
+--     -- line 2
+--     #include "h2.h"
+--     -- line 4
+--
+-- the output ended with h2.h's own markers and then carried straight on into
+-- M2's line 4 with nothing to say so.
+--
+-- The markers go in the segment rather than beside it because that is where
+-- they belong in the output. Each is a 'yieldLineNum', which is two things at
+-- once -- the visible marker, and a @#line@ directive that hpp consumes to fix
+-- its own counter -- so inserting a line does not itself shift the count.
 
 -- | Handle preprocessor directives (commands prefixed with an octothorpe).
 directive :: forall m. (Monad m, HasError m, HasHppState m, HasEnv m)
@@ -207,8 +236,9 @@ directive = lift (onElements (awaitJust "directive")) >>= aux
                  then pure toks
                  else lift (lift (evalParse expandLineState [toks]))
              let fileName = toChars (detokenize (trimUnimportant finalToks))
-             prep <- prepareInput
+             -- See Note [Preparing a file names that file] in Hpp.Preprocessing.
              (resolvedPath, content) <- readFun ln fileName
+             prep <- prepareInputFor resolvedPath
              let src = prep content
              lift (streamNewFile resolvedPath src)
         {- SPECIALIZE includeAux ::
