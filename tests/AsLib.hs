@@ -112,6 +112,39 @@ ignoreUnknown = T.over T.config (T.setL C.ignoreUnknownDirectivesL True)
 haskellComments :: HppState -> HppState
 haskellComments = T.over T.config (T.setL C.ignoreHaskellCommentsL True)
 
+-- | Erase block comments, but leave @//@ alone -- what @-traditional@ does,
+-- and what a language in which @//@ is an operator needs.
+no_line_comments :: HppState -> HppState
+no_line_comments = T.over T.config ( T.setL C.eraseCCommentsL True
+                                   . T.setL C.eraseCLineCommentsL False )
+
+-- | Emit line markers, written the way GHC wants them.
+haskell_line_markers :: HppState -> HppState
+haskell_line_markers =
+  T.over T.config ( T.setL C.inhibitLinemarkersL False
+                  . T.setL C.lineMarkerStyleL C.HaskellLineMarkers )
+
+-- | 'hppHelper' against a predicate rather than an exact output, for the cases
+-- where what matters is which text survived and not how it was spaced.
+hppPredHelper :: HppState -> [ByteString] -> ([ByteString] -> Bool) -> IO Bool
+hppPredHelper st src ok =
+  case runExcept (expand st (preprocess src)) of
+    Left e -> putStrLn ("Error running hpp: " ++ show e) >> return False
+    Right (res, _) | ok (hppOutput res) -> return True
+                   | otherwise -> do putStrLn ("Got: " ++ show (hppOutput res))
+                                     return False
+
+-- | The emitted lines, joined and re-split, so a test can talk about lines
+-- rather than about however the output happened to be chunked.
+outputLines :: [ByteString] -> [ByteString]
+outputLines = BS.lines . BS.concat
+
+-- | Does some line contain @needle@, and does a later one contain @after@?
+inOrder :: ByteString -> ByteString -> [ByteString] -> Bool
+inOrder needle after ls = case break (BS.isInfixOf needle) ls of
+  (_, _:rest) -> any (BS.isInfixOf after) rest
+  _           -> False
+
 add_definition :: ByteString -> ByteString -> HppState -> HppState
 add_definition k v s = fromMaybe (error "Preprocessor definition did not parse")
                                  (addDefinition k v s)
@@ -700,6 +733,74 @@ tests =
   , hppHelper (haskellComments $ remove_line
                $ add_definition "FOO" "1" emptyHppState)
             sourceIfdef ["x = 42\n","\n"]
+
+
+  -- Erasing C comments erases both kinds, and one of them is a Haskell
+  -- operator. array exports (//), so erasing to the end of the line truncates
+  -- Data/Array/Base.hs from its first use and the module fails to parse four
+  -- hundred lines later, somewhere else entirely.
+  , hppPredHelper (remove_comments (remove_line emptyHppState))
+      ["arr // ies = arr"]
+      (not . any (BS.isInfixOf "//") . outputLines)
+
+  , hppPredHelper (no_line_comments (remove_line emptyHppState))
+      ["arr // ies = arr"]
+      (any (BS.isInfixOf "arr // ies = arr") . outputLines)
+
+  -- Withholding the line-comment half does not withhold the other one: a block
+  -- comment still goes, because an #include can bring one into a Haskell
+  -- buffer and it would not parse there.
+  , hppPredHelper (no_line_comments (remove_line emptyHppState))
+      ["before /* gone */ after"]
+      (\out -> let ls = outputLines out
+               in not (any (BS.isInfixOf "gone") ls)
+                  && any (BS.isInfixOf "before") ls)
+
+  -- A line marker in GHC's syntax rather than C's. The #if is what makes one
+  -- be emitted at all; what is being checked is how it is written.
+  , hppPredHelper (haskell_line_markers emptyHppState)
+      ["#if 1", "kept", "#endif"]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "{-# LINE") ls
+                  && not (any (BS.isInfixOf "#line") ls)
+                  && any (BS.isInfixOf "\"NoFile\"") ls)
+
+  -- ... and the C syntax is still the default.
+  , hppPredHelper (T.over T.config (T.setL C.inhibitLinemarkersL False)
+                     emptyHppState)
+      ["#if 1", "kept", "#endif"]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "#line") ls
+                  && not (any (BS.isInfixOf "{-# LINE") ls))
+
+  -- An #include is two markers: one saying the included file starts here, and
+  -- one saying we are back where we were. Neither was emitted, so a header
+  -- with no #if in it moved every following line and said nothing, and one
+  -- with an #if left the reader inside the header for the rest of the outer
+  -- file.
+  --
+  -- markers/hdr.h also opens with a multi-line block comment, which the
+  -- preparation pass replaces with a marker of its own. That marker must name
+  -- hdr.h: it is built before the file is entered, and used to inherit the
+  -- name of whatever did the including.
+  , withCurrentDirectory "tests/include-data" $
+      hppFileHelper
+        (haskell_line_markers
+           (with_include_paths ["markers"] emptyHppState))
+        ["#include \"hdr.h\"", "after_include"]
+        (\out ->
+           let ls = outputLines out
+               enter = "{-# LINE 1 \"markers/hdr.h\" #-}"
+           in -- entering names the header at line 1
+              any (BS.isInfixOf enter) ls
+              -- the marker the header's own block comment produces names the
+              -- header, not whatever included it: line 5 is the #define just
+              -- past the comment's closing */
+              && any (BS.isInfixOf "{-# LINE 5 \"markers/hdr.h\" #-}") ls
+              -- leaving names the includer, and the text after the #include
+              -- comes after that
+              && inOrder enter "\"NoFile\"" ls
+              && inOrder "\"NoFile\"" "after_include" ls)
 
   ]
 
