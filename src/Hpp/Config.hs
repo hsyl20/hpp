@@ -100,7 +100,43 @@ data ConfigF f = Config { curFileNameF        :: f FilePath
                         -- @{-# LANGUAGE … #-}@ pragmas and stray @#@
                         -- in comments do not confuse the directive
                         -- parser.
+                        , traditionalMacrosF :: f Bool
+                        -- ^ Leave @#@ and @##@ alone inside the body
+                        -- of a function-like macro, rather than
+                        -- reading them as the stringification and
+                        -- token-pasting operators. See Note [# is a
+                        -- letter in Haskell].
                        }
+
+-- Note [# is a letter in Haskell]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- @#@ is punctuation in C, where the preprocessor may claim it: inside the body
+-- of a function-like macro, @#x@ is the spelling of x's argument as a string
+-- literal, and @a ## b@ glues two tokens together.
+--
+-- In Haskell with MagicHash it is part of a name. @Int#@, @unI#@ and
+-- @sizeOfType#@ are identifiers, @{-\# INLINE f \#-}@ is a pragma, and a
+-- package that writes a CPP macro to generate instances writes all of them
+-- inside a macro body:
+--
+--     #define derivePrim(ty, ctr, sz, ...)                  \
+--     instance Prim (ty) where {                            \
+--       sizeOfType# _ = unI# sz                             \
+--     ; ...                                                 \
+--     ; {-# INLINE sizeOfType# #-} }
+--
+--     derivePrim(Word, W#, sIZEOF_WORD, ...)  -- primitive's Data.Primitive.Types
+--
+-- Read as C, @unI# sz@ stringifies the argument -- @unI\"sIZEOF_WORD\"@ -- and
+-- @{-\# INLINE sizeOfType# \#-}@ comes out as @{-\#INLINE sizeOfType-}@. The
+-- module then fails to parse in the middle of a generated instance, at a column
+-- that exists only after expansion.
+--
+-- GHC never hits this because it runs the C preprocessor with
+-- @-traditional-cpp@, which has neither operator: the @#@ characters above
+-- survive untouched, which is what makes such macros writable at all. This flag
+-- is that behaviour. Like 'eraseCLineCommentsF' it is off by default, because a
+-- caller preprocessing actual C wants the C reading.
 
 -- | A fully-populated configuration for the pre-processor.
 type Config = ConfigF Identity
@@ -120,12 +156,13 @@ realizeConfig (Config (Just fileName)
                       (Just pdate)
                       (Just ptime)
                       (Just ignoreUnknown)
-                      (Just ignoreHsCmts)) =
+                      (Just ignoreHsCmts)
+                      (Just tradMacros)) =
   Just (Config (pure fileName) (pure paths) (pure spliceLines) (pure comments)
                (pure lineComments) (pure inhibitLines) (pure markerStyle)
                (pure trigraphs)
                (pure pdate) (pure ptime)
-               (pure ignoreUnknown) (pure ignoreHsCmts))
+               (pure ignoreUnknown) (pure ignoreHsCmts) (pure tradMacros))
 realizeConfig _ = Nothing
 
 -- | Extract the current file name from a configuration.
@@ -193,6 +230,11 @@ ignoreUnknownDirectives = runIdentity . ignoreUnknownDirectivesF
 ignoreHaskellComments :: Config -> Bool
 ignoreHaskellComments = runIdentity . ignoreHaskellCommentsF
 
+-- | Determine whether @#@ and @##@ keep their C meaning inside the body of a
+-- function-like macro. See Note [# is a letter in Haskell].
+traditionalMacros :: Config -> Bool
+traditionalMacros = runIdentity . traditionalMacrosF
+
 -- | A default configuration with no current file name set. Note that
 -- long line splicing is enabled, C++-style comments are erased, #line
 -- markers are inhibited, and trigraph replacement is disabled.
@@ -202,7 +244,7 @@ defaultConfigF = Config Nothing (Just [])
                         (Just CLineMarkers) (Just False)
                         (Just (DateString "??? ?? ????"))
                         (Just (TimeString "??:??:??"))
-                        (Just False) (Just False)
+                        (Just False) (Just False) (Just False)
 
 -- | Format a date according to the C spec.
 formatPrepDate :: UTCTime -> DateString
@@ -264,3 +306,8 @@ ignoreUnknownDirectivesL f cfg = (\x -> cfg { ignoreUnknownDirectivesF = pure x 
 ignoreHaskellCommentsL :: Functor f => (Bool -> f Bool) -> Config -> f Config
 ignoreHaskellCommentsL f cfg = (\x -> cfg { ignoreHaskellCommentsF = pure x })
                                <$> f (ignoreHaskellComments cfg)
+
+-- | Lens for the "traditional macros" option.
+traditionalMacrosL :: Functor f => (Bool -> f Bool) -> Config -> f Config
+traditionalMacrosL f cfg = (\x -> cfg { traditionalMacrosF = pure x })
+                           <$> f (traditionalMacros cfg)

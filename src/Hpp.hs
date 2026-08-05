@@ -5,7 +5,7 @@ module Hpp ( -- * Running the Preprocessor
             -- * Preprocessor State
             T.HppState, emptyHppState, initHppState,
             -- * Adding Definitions
-            parseDefinition, addDefinition,
+            parseDefinition, addDefinition, macroStyle, M.MacroStyle(..),
             -- * Core Types
              HppT, HppOutput(..), R.IncludedFile(..)
             ) where
@@ -124,12 +124,24 @@ initHppState c e = setL lineNum 1 . setL env e . setL config c $ emptyHppState
 
 -- | @addDefinition name expression@ adds a binding of @name@ to
 -- @expression@ in the preprocessor’s internal state.
+--
+-- The state's configuration decides how a @#@ in @expression@ is read; see
+-- Note [# is a letter in Haskell] in "Hpp.Config".
 addDefinition :: ByteString -> ByteString -> T.HppState -> Maybe T.HppState
-addDefinition name val s = flip (T.over T.env) s . E.insertPair
-                           <$> parseDefinition name val
+addDefinition name val s =
+  flip (T.over T.env) s . E.insertPair
+    <$> parseDefinition (macroStyle (T.getL config s)) name val
+
+-- | How a definition read under this configuration treats @#@ and @##@.
+macroStyle :: C.Config -> M.MacroStyle
+macroStyle cfg
+  | C.traditionalMacros cfg = M.TraditionalMacros
+  | otherwise               = M.StandardMacros
 
 -- | Lower level parsing of macro definitions. Will typically be used
 -- with 'E.insertPair' for manual construction of a 'T.Env' binding
 -- environment.
-parseDefinition :: ByteString -> ByteString -> Maybe (ByteString, T.Macro)
-parseDefinition name val = M.parseDefinition (tokenize name ++ tokenize val)
+parseDefinition :: M.MacroStyle -> ByteString -> ByteString
+                -> Maybe (ByteString, T.Macro)
+parseDefinition style name val =
+  M.parseDefinition style (tokenize name ++ tokenize val)

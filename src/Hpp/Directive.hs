@@ -8,11 +8,12 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.State.Strict (StateT)
 import Hpp.Conditional (dropBranch, takeBranch, yieldLineNum)
-import Hpp.Config (curFileName, curFileNameF, ignoreUnknownDirectives)
+import Hpp.Config (Config, curFileName, curFileNameF, ignoreUnknownDirectives,
+                   traditionalMacros)
 import Hpp.Env (lookupKey, deleteKey, insertPair)
 import Hpp.Expansion (expandLineState)
 import Hpp.Expr (evalExpr, parseExpr)
-import Hpp.Macro (parseDefinition)
+import Hpp.Macro (parseDefinition, MacroStyle(..))
 import Hpp.Preprocessing (prepareInputFor)
 import Hpp.StringSig (unquote, toChars, uncons)
 import Hpp.Tokens (newLine, notImportant, trimUnimportant, detokenize, isImportant, Token(..))
@@ -113,6 +114,12 @@ streamNewFile fp s =
 -- once -- the visible marker, and a @#line@ directive that hpp consumes to fix
 -- its own counter -- so inserting a line does not itself shift the count.
 
+-- | How a @#define@ read under this configuration treats @#@ and @##@.
+macroStyle :: Config -> MacroStyle
+macroStyle cfg
+  | traditionalMacros cfg = TraditionalMacros
+  | otherwise             = StandardMacros
+
 -- | Handle preprocessor directives (commands prefixed with an octothorpe).
 directive :: forall m. (Monad m, HasError m, HasHppState m, HasEnv m)
           => HppT [String] (Parser m [TOKEN]) Bool
@@ -121,10 +128,12 @@ directive = lift (onElements (awaitJust "directive")) >>= aux
         aux (Important cmd) = case cmd of
           "pragma" -> True <$ lift dropLine -- Ignored
           "define" -> True <$
-                      (lift $ fmap parseDefinition takeLine >>= \case
-                        Nothing -> use lineNum >>=
-                                   throwError . BadMacroDefinition
-                        Just def -> env %= insertPair def)
+                      (lift $ do
+                        style <- macroStyle <$> use config
+                        parseDefinition style <$> takeLine >>= \case
+                          Nothing -> use lineNum >>=
+                                     throwError . BadMacroDefinition
+                          Just def -> env %= insertPair def)
           "undef" -> do name <- lift . onElements $ do
                           droppingWhile (not . isImportant)
                           name <- awaitJust "undef" >>= \case

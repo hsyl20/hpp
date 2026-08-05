@@ -118,6 +118,11 @@ no_line_comments :: HppState -> HppState
 no_line_comments = T.over T.config ( T.setL C.eraseCCommentsL True
                                    . T.setL C.eraseCLineCommentsL False )
 
+-- | Leave @#@ and @##@ alone in a macro body -- what @-traditional-cpp@ does,
+-- and what a language in which @#@ is part of a name needs.
+traditional_macros :: HppState -> HppState
+traditional_macros = T.over T.config (T.setL C.traditionalMacrosL True)
+
 -- | Emit line markers, written the way GHC wants them.
 haskell_line_markers :: HppState -> HppState
 haskell_line_markers =
@@ -801,6 +806,35 @@ tests =
               -- comes after that
               && inOrder enter "\"NoFile\"" ls
               && inOrder "\"NoFile\"" "after_include" ls)
+
+  -- '#' is a letter in Haskell. primitive's Data.Primitive.Types writes a
+  -- macro whose body is full of them -- 'unI# sz', '{-# INLINE sizeOfType#
+  -- #-}' -- and read as C the first stringifies its argument and the second
+  -- comes out as '{-#INLINE sizeOfType-}'.
+  , hppPredHelper (traditional_macros emptyHppState)
+      [ "#define derive(ty, sz) sizeOfType# _ = unI# sz ; {-# INLINE ty# #-}"
+      , "derive(Word, sIZEOF_WORD)" ]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "sizeOfType# _ = unI# sIZEOF_WORD") ls
+                  && any (BS.isInfixOf "{-# INLINE Word# #-}") ls)
+
+  -- ... and C is still the default: there, '#sz' is the argument's spelling.
+  , hppPredHelper emptyHppState
+      [ "#define stringy(sz) unI# sz"
+      , "stringy(sIZEOF_WORD)" ]
+      (any (BS.isInfixOf "unI\"sIZEOF_WORD\"") . outputLines)
+
+  -- The other half of the same switch: '##' pastes under C, and is two
+  -- ordinary characters under -traditional.
+  , hppPredHelper emptyHppState
+      [ "#define glue(a, b) a ## b"
+      , "glue(Data.Primitive, .Types)" ]
+      (any (BS.isInfixOf "Data.Primitive.Types") . outputLines)
+
+  , hppPredHelper (traditional_macros emptyHppState)
+      [ "#define glue(a, b) a ## b"
+      , "glue(x, y)" ]
+      (any (BS.isInfixOf "x ## y") . outputLines)
 
   ]
 

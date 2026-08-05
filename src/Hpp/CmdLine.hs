@@ -1,9 +1,10 @@
-{-# LANGUAGE OverloadedStrings, RankNTypes #-}
+{-# LANGUAGE OverloadedStrings, RankNTypes, TupleSections #-}
 -- | A front-end to run Hpp with textual arguments as from a command
 -- line invocation.
 module Hpp.CmdLine (runWithArgs) where
 import Control.Monad (unless)
 import Control.Monad.Trans.Except (runExceptT)
+import Data.ByteString.Char8 (ByteString)
 import Data.String (fromString)
 import Hpp
 import Hpp.Config
@@ -31,34 +32,43 @@ splitSwitches ('-':'o':t@(_:_)) = ["-o",t]
 splitSwitches ('-':'i':'n':'c':'l':'u':'d':'e':t@(_:_)) = ["-include",t]
 splitSwitches x = [x]
 
+-- | A @-D@ or @-U@ from the command line, kept until the configuration is
+-- known. See Note [Definitions wait for the configuration].
+data EnvOp = Define ByteString ByteString | Undef ByteString
+
+-- Note [Definitions wait for the configuration]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Reading a @-D@ into a macro is not independent of the configuration:
+-- @--ftraditional-macros@ decides whether a @#@ in the body is an operator.
+-- Applying each @-D@ where it is parsed would make the result depend on where
+-- the switch sits on the command line, so the ops are collected in order and
+-- replayed once 'realizeConfig' has produced the configuration they are read
+-- under.
+
 -- FIXME: Defining function macros probably doesn't work here.
 parseArgs :: ConfigF Maybe -> [String]
           -> IO (Either Error (Env, [String], Config, Maybe FilePath))
-parseArgs cfg0 = go emptyEnv id cfg0 Nothing . concatMap breakEqs
-  where go env acc cfg out [] =
+parseArgs cfg0 = go id id cfg0 Nothing . concatMap breakEqs
+  where go ops acc cfg out [] =
           case realizeConfig cfg of
-            Just cfg' -> return (Right (env, acc [], cfg', out))
+            Just cfg' -> return ((, acc [], cfg', out) <$> replay cfg' (ops []))
             Nothing -> return (Left NoInputFile)
-        go env acc cfg out ("-D":name:"=":body:rst) =
-          case parseDefinition (fromString name) (fromString body) of
-            Nothing -> return . Left $ BadMacroDefinition 0
-            Just def -> go (insertPair def env) acc cfg out rst
-        go env acc cfg out ("-D":name:rst) =
-          case parseDefinition (fromString name) "1" of
-            Nothing -> return . Left $ BadMacroDefinition 0
-            Just def -> go (insertPair def env) acc cfg out rst
-        go env acc cfg out ("-U":name:rst) =
-          go (deleteKey (fromString name) env) acc cfg out rst
-        go env acc cfg out ("-I":dir:rst) =
+        go ops acc cfg out ("-D":name:"=":body:rst) =
+          go (ops . (Define (fromString name) (fromString body):)) acc cfg out rst
+        go ops acc cfg out ("-D":name:rst) =
+          go (ops . (Define (fromString name) "1":)) acc cfg out rst
+        go ops acc cfg out ("-U":name:rst) =
+          go (ops . (Undef (fromString name):)) acc cfg out rst
+        go ops acc cfg out ("-I":dir:rst) =
           let cfg' = cfg { includePathsF = fmap (++[dir]) (includePathsF cfg) }
-          in go env acc cfg' out rst
-        go env acc cfg out ("-include":file:rst) =
+          in go ops acc cfg' out rst
+        go ops acc cfg out ("-include":file:rst) =
           let ln = "#include \"" ++ file ++ "\""
-          in go env (acc . (ln:)) cfg out rst
-        go env acc cfg out ("-P":rst) =
+          in go ops (acc . (ln:)) cfg out rst
+        go ops acc cfg out ("-P":rst) =
           let cfg' = cfg { inhibitLinemarkersF = Just True }
-          in go env acc cfg' out rst
-        go env acc cfg out ("--cpp":rst) =
+          in go ops acc cfg' out rst
+        go ops acc cfg out ("--cpp":rst) =
           let cfg' = cfg { spliceLongLinesF = Just True
                          , eraseCCommentsF = Just True
                          , inhibitLinemarkersF = Just False
@@ -68,43 +78,57 @@ parseArgs cfg0 = go emptyEnv id cfg0 Nothing . concatMap breakEqs
                          -- __STDC_VERSION__ is only defined in C94 and later
                        , ["__STDC_VERSION__","=","199409L"] ]
                        -- , ["_POSIX_C_SOURCE","=","200112L"] ]
-          in go env acc cfg' out (defs ++ rst)
+          in go ops acc cfg' out (defs ++ rst)
         -- See Note [GHC syntax for line markers] in "Hpp.Config".
-        go env acc cfg out ("--fhaskell-line-markers":rst) =
-          go env acc (cfg { lineMarkerStyleF = Just HaskellLineMarkers
+        go ops acc cfg out ("--fhaskell-line-markers":rst) =
+          go ops acc (cfg { lineMarkerStyleF = Just HaskellLineMarkers
                           , inhibitLinemarkersF = Just False }) out rst
-        go env acc cfg out ("--fline-splice":rst) =
-          go env acc (cfg { spliceLongLinesF = Just True }) out rst
-        go env acc cfg out ("--ferase-comments":rst) =
-          go env acc (cfg { eraseCCommentsF = Just True }) out rst
+        go ops acc cfg out ("--fline-splice":rst) =
+          go ops acc (cfg { spliceLongLinesF = Just True }) out rst
+        go ops acc cfg out ("--ferase-comments":rst) =
+          go ops acc (cfg { eraseCCommentsF = Just True }) out rst
         -- '//' is an operator in some languages -- Haskell has one -- so
         -- erasing to the end of the line there destroys code. Block comments
         -- are erased either way. See 'eraseCLineCommentsF'.
-        go env acc cfg out ("--fno-line-comments":rst) =
-          go env acc (cfg { eraseCLineCommentsF = Just False }) out rst
+        go ops acc cfg out ("--fno-line-comments":rst) =
+          go ops acc (cfg { eraseCLineCommentsF = Just False }) out rst
         -- See 'ignoreHaskellCommentsF'.
-        go env acc cfg out ("--fhaskell-comments":rst) =
-          go env acc (cfg { ignoreHaskellCommentsF = Just True }) out rst
-        go env acc cfg out ("--freplace-trigraphs":rst) =
-          go env acc (cfg { replaceTrigraphsF = Just True }) out rst
-        go env acc cfg out ("--only-macros":rst) =
-          go env acc (cfg { replaceTrigraphsF = Just False
+        go ops acc cfg out ("--fhaskell-comments":rst) =
+          go ops acc (cfg { ignoreHaskellCommentsF = Just True }) out rst
+        -- See Note [# is a letter in Haskell] in "Hpp.Config".
+        go ops acc cfg out ("--ftraditional-macros":rst) =
+          go ops acc (cfg { traditionalMacrosF = Just True }) out rst
+        go ops acc cfg out ("--freplace-trigraphs":rst) =
+          go ops acc (cfg { replaceTrigraphsF = Just True }) out rst
+        go ops acc cfg out ("--only-macros":rst) =
+          go ops acc (cfg { replaceTrigraphsF = Just False
                           , spliceLongLinesF = Just False
                           , eraseCCommentsF = Just False }) out rst
-        go env acc cfg _ ("-o":file:rst) =
-          go env acc cfg (Just file) rst
-        go env acc cfg out ("-x":_lang:rst) =
-          go env acc cfg out rst -- We ignore source language specification
-        go env acc cfg out ("-traditional":rst) =
-          go env acc cfg out rst -- Ignore the "-traditional" flag
-        go env acc cfg out ("-Werror":rst) =
-          go env acc cfg out rst -- Ignore the "-Werror" flag
-        go env acc cfg Nothing (file:rst) =
+        go ops acc cfg _ ("-o":file:rst) =
+          go ops acc cfg (Just file) rst
+        go ops acc cfg out ("-x":_lang:rst) =
+          go ops acc cfg out rst -- We ignore source language specification
+        go ops acc cfg out ("-traditional":rst) =
+          go ops acc cfg out rst -- Ignore the "-traditional" flag
+        go ops acc cfg out ("-Werror":rst) =
+          go ops acc cfg out rst -- Ignore the "-Werror" flag
+        go ops acc cfg Nothing (file:rst) =
           case curFileNameF cfg of
-            Nothing -> go env acc (cfg { curFileNameF = Just file }) Nothing rst
-            Just _ -> go env acc cfg (Just file) rst
+            Nothing -> go ops acc (cfg { curFileNameF = Just file }) Nothing rst
+            Just _ -> go ops acc cfg (Just file) rst
         go _ _ _ (Just _) _ =
           return . Left $ BadCommandLine "Multiple output files given"
+
+        -- Apply the collected -D and -U in the order they were given, now that
+        -- the configuration they are read under is known.
+        replay cfg = foldl step (Right emptyEnv)
+          where style = macroStyle cfg
+                step (Left e) _ = Left e
+                step (Right env) (Undef name) = Right (deleteKey name env)
+                step (Right env) (Define name body) =
+                  case parseDefinition style name body of
+                    Nothing  -> Left (BadMacroDefinition 0)
+                    Just def -> Right (insertPair def env)
 
 -- | Run Hpp with the given commandline arguments.
 runWithArgs :: [String] -> IO (Maybe Error)
