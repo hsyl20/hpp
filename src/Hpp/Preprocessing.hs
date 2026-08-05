@@ -126,23 +126,23 @@ removeMultilineComments !lineStart = goStart lineStart
 -- | Remove C-style comments bracketed by @/*@ and @*/@ and one-line '//'
 -- comments.
 cCommentRemoval :: Stringy s => [s] -> [s]
-cCommentRemoval = cCommentRemoval' False
+cCommentRemoval = cCommentRemoval' True False
 
 -- | Remove C-style comments bracked by @/*@ and @*/@ and perform
 -- trigraph replacement.
 cCommentAndTrigraph :: Stringy s => [s] -> [s]
-cCommentAndTrigraph = cCommentRemoval' True
+cCommentAndTrigraph = cCommentRemoval' True True
 
 -- | Remove C-style comments bracketed by @/*@ and @*/@ and one-line '//'
 -- comments, and optionally perform trigraph replacement.
-cCommentRemoval' :: Stringy s => Bool -> [s] -> [s]
-cCommentRemoval' do_trigraphs =
+cCommentRemoval' :: Stringy s => Bool -> Bool -> [s] -> [s]
+cCommentRemoval' do_line_comments do_trigraphs =
   -- important: drop '//' comments last, otherwise we would try to remove '//'
   -- comments into block comments. For example:
   --    <https://www.foo.org>. */
   --  would become
   --    <https:
-  map dropOneLineComments
+  (if do_line_comments then map dropOneLineComments else id)
   . removeMultilineComments 1
   . map dropOneLineBlockComments
   . (if do_trigraphs then map trigraphReplacement else id)
@@ -360,13 +360,17 @@ prepareInput =
   do cfg <- getL config <$> getState
      let gate | ignoreHaskellComments cfg = gateHaskellComments
               | otherwise                 = id
+     -- The two fast paths below bake in '//' removal, so they are only
+     -- applicable when it is wanted. See 'eraseCLineCommentsF'.
      let cpp = if
           | eraseCComments cfg
+          , eraseCLineComments cfg
           , spliceLongLines cfg
           , not (inhibitLinemarkers cfg)
           -> normalCPP
 
           | eraseCComments cfg
+          , eraseCLineComments cfg
           , spliceLongLines cfg
           , not (replaceTrigraphs cfg)
           -> haskellCPP
@@ -407,5 +411,7 @@ onlyMacrosCPP = map ((++[Other "\n"]) . tokenize)
 genericConfig :: Config -> [String] -> [[TOKEN]]
 genericConfig cfg = map ((++ [Other "\n"]) . tokenize)
                   . (if spliceLongLines cfg then lineSplicing else id)
-                  . (if eraseCComments cfg then cCommentRemoval else id)
+                  . (if eraseCComments cfg
+                       then cCommentRemoval' (eraseCLineComments cfg) False
+                       else id)
                   . (if replaceTrigraphs cfg then map trigraphReplacement else id)

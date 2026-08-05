@@ -73,6 +73,11 @@ parseArgs cfg0 = go emptyEnv id cfg0 Nothing . concatMap breakEqs
           go env acc (cfg { spliceLongLinesF = Just True }) out rst
         go env acc cfg out ("--ferase-comments":rst) =
           go env acc (cfg { eraseCCommentsF = Just True }) out rst
+        -- '//' is an operator in some languages -- Haskell has one -- so
+        -- erasing to the end of the line there destroys code. Block comments
+        -- are erased either way. See 'eraseCLineCommentsF'.
+        go env acc cfg out ("--fno-line-comments":rst) =
+          go env acc (cfg { eraseCLineCommentsF = Just False }) out rst
         go env acc cfg out ("--freplace-trigraphs":rst) =
           go env acc (cfg { replaceTrigraphsF = Just True }) out rst
         go env acc cfg out ("--only-macros":rst) =

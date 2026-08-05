@@ -33,7 +33,20 @@ data ConfigF f = Config { curFileNameF        :: f FilePath
                         , eraseCCommentsF     :: f Bool
                         -- ^ Erase line comments (starting with @//@)
                         -- and block comments (delimited by @/*@ and
-                        -- @*/@).
+                        -- @*/@). 'eraseCLineCommentsF' can withhold
+                        -- the first half.
+                        , eraseCLineCommentsF :: f Bool
+                        -- ^ Whether erasing C comments includes line
+                        -- comments (starting with @//@). Ignored
+                        -- unless 'eraseCCommentsF' is set.
+                        --
+                        -- Off is what @-traditional@ does, and what a
+                        -- Haskell source needs: @//@ is an ordinary
+                        -- operator there -- @array@ exports one -- so
+                        -- erasing to the end of the line silently
+                        -- truncates real code. Block comments still
+                        -- have to go, because an @#include@ can bring
+                        -- them into a Haskell buffer.
                         , inhibitLinemarkersF :: f Bool
                         -- ^ Do not emit @#line@ directives.
                         , replaceTrigraphsF   :: f Bool
@@ -73,6 +86,7 @@ realizeConfig (Config (Just fileName)
                       (Just paths)
                       (Just spliceLines)
                       (Just comments)
+                      (Just lineComments)
                       (Just inhibitLines)
                       (Just trigraphs)
                       (Just pdate)
@@ -80,7 +94,8 @@ realizeConfig (Config (Just fileName)
                       (Just ignoreUnknown)
                       (Just ignoreHsCmts)) =
   Just (Config (pure fileName) (pure paths) (pure spliceLines) (pure comments)
-               (pure inhibitLines) (pure trigraphs) (pure pdate) (pure ptime)
+               (pure lineComments) (pure inhibitLines) (pure trigraphs)
+               (pure pdate) (pure ptime)
                (pure ignoreUnknown) (pure ignoreHsCmts))
 realizeConfig _ = Nothing
 
@@ -99,6 +114,10 @@ spliceLongLines = runIdentity . spliceLongLinesF
 -- | Determine if C-style comments should be erased.
 eraseCComments :: Config -> Bool
 eraseCComments = runIdentity . eraseCCommentsF
+
+-- | Whether erasing C comments includes @//@ line comments.
+eraseCLineComments :: Config -> Bool
+eraseCLineComments = runIdentity . eraseCLineCommentsF
 
 -- | Determine if generation of linemarkers should be inhibited.
 inhibitLinemarkers :: Config -> Bool
@@ -131,7 +150,8 @@ ignoreHaskellComments = runIdentity . ignoreHaskellCommentsF
 -- markers are inhibited, and trigraph replacement is disabled.
 defaultConfigF :: ConfigF Maybe
 defaultConfigF = Config Nothing (Just [])
-                        (Just True) (Just True) (Just False) (Just False)
+                        (Just True) (Just True) (Just True) (Just False)
+                        (Just False)
                         (Just (DateString "??? ?? ????"))
                         (Just (TimeString "??:??:??"))
                         (Just False) (Just False)
@@ -166,6 +186,10 @@ spliceLongLinesL f cfg = (\x -> cfg { spliceLongLinesF = pure x })
 eraseCCommentsL :: Functor f => (Bool -> f Bool) -> Config -> f Config
 eraseCCommentsL f cfg = (\x -> cfg { eraseCCommentsF = pure x })
                         <$> f (eraseCComments cfg)
+
+eraseCLineCommentsL :: Functor f => (Bool -> f Bool) -> Config -> f Config
+eraseCLineCommentsL f cfg = (\x -> cfg { eraseCLineCommentsF = pure x })
+                            <$> f (eraseCLineComments cfg)
 
 -- | Lens for the "inhibit line markers" option. Option to disable the
 -- emission of #line pragmas in the output.
