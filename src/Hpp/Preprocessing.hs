@@ -67,10 +67,55 @@ lineSplicing = go id
 
 -- * C Comments
 
+-- Note [A quote can be a character]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Erasing comments means knowing where the string literals are, because a
+-- comment opener inside one opens no comment. Finding the string literals means
+-- reading a @"@ as opening one -- except where it is the body of a character
+-- literal. The line this function is written on is the example: it passes a
+-- comment opener as a string, and the quote character as a character.
+--
+-- Read as a string opener, the @"@ inside the character literal opens a string
+-- that runs to the next @"@ -- the one that really does open the string
+-- literal -- and scanning resumes in the middle of it, where the comment opener
+-- it holds is taken for a real one and everything to the next closer, lines
+-- away, is erased. What comes back does not parse, at a @,@ nowhere near the
+-- cause.
+--
+-- Both languages this runs over have character literals and gcc gets this
+-- right in both, so the check is not Haskell-specific: a @"@ with a @'@ on
+-- either side of it (or @'\\@ before, for the escaped spelling) is a
+-- character, not the start of a string.
+--
+-- (And no comment in this file may write the two-character openers and closers
+-- out, since this pass runs over its own source: doing so opens a comment in
+-- the middle of a Haskell one, which is what CPP does to any Haskell file and
+-- why they are spelled out in words here.)
+
+-- | Is the @\"@ between these two halves the body of a character literal
+-- rather than the start of a string? See Note [A quote can be a character].
+quotedQuote :: Stringy s => s -> s -> Bool
+quotedQuote pre pos = closes && opens
+  where
+    closes = case uncons pos of
+      Just ('\'', _) -> True
+      _              -> False
+    opens = case unsnoc pre of
+      Just (_, '\'')  -> True
+      Just (p, '\\')  -> case unsnoc p of
+        Just (_, '\'') -> True
+        _              -> False
+      _ -> False
+
 breakBlockCommentStart :: Stringy s => s -> Maybe (s, s)
 breakBlockCommentStart s =
   case breakCharOrSub '"' "/*" s of
     NoMatch -> Nothing
+    -- See Note [A quote can be a character].
+    CharMatch pre pos
+      | quotedQuote pre pos
+      , Just (q, rest) <- uncons pos
+      -> first ((snoc (snoc pre '"') q) <>) <$> breakBlockCommentStart rest
     CharMatch pre pos -> let (lit, rest) = skipLiteral pos
                          in first ((snoc pre '"' <> lit) <>) <$>
                             breakBlockCommentStart rest
@@ -86,6 +131,11 @@ dropOneLineComments :: Stringy s => s -> s
 dropOneLineComments s =
   case breakCharOrSub '"' "//" s of
     NoMatch -> s
+    -- See Note [A quote can be a character].
+    CharMatch pre pos
+      | quotedQuote pre pos
+      , Just (q, rest) <- uncons pos
+      -> snoc (snoc pre '"') q <> dropOneLineComments rest
     CharMatch pre pos ->
       let (lit,rest) = skipLiteral pos
       in snoc pre '"' <> lit <> dropOneLineComments rest
@@ -95,6 +145,11 @@ dropOneLineBlockComments :: Stringy s => s -> s
 dropOneLineBlockComments s =
   case breakCharOrSub '"' "/*" s of
     NoMatch -> s
+    -- See Note [A quote can be a character].
+    CharMatch pre pos
+      | quotedQuote pre pos
+      , Just (q, rest) <- uncons pos
+      -> snoc (snoc pre '"') q <> dropOneLineBlockComments rest
     CharMatch pre pos ->
       let (lit,rest) = skipLiteral pos
       in snoc pre '"' <> lit <> dropOneLineBlockComments rest

@@ -852,6 +852,24 @@ tests =
                   && not (any (BS.isInfixOf "\"c\" f = i") ls)
                   && not (any (BS.isInfixOf "#if") ls))
 
+  -- A '"' between two "'"s is a character, not the start of a string, so the
+  -- '/*' in the string that follows it is still inside one and is not a
+  -- comment. hpp's own Hpp.Preprocessing has the line.
+  , hppPredHelper (remove_comments emptyHppState)
+      [ "case breakCharOrSub '\"' \"/*\" s of"
+      , "  NoMatch -> Nothing"
+      , "x = 1 */ 2" ]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "NoMatch -> Nothing") ls
+                  && any (BS.isInfixOf "breakCharOrSub '\"' \"/*\" s of") ls)
+
+  -- ... and a real block comment in the same position still goes.
+  , hppPredHelper (remove_comments emptyHppState)
+      [ "before /* gone", "still gone */ after" ]
+      (\out -> let ls = outputLines out
+               in not (any (BS.isInfixOf "gone") ls)
+                  && any (BS.isInfixOf "after") ls)
+
   -- ... while the '#' that closes the pragma is still not one.
   , hppPredHelper (haskellComments emptyHppState)
       [ "{-# LANGUAGE CPP"
