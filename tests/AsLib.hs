@@ -836,6 +836,31 @@ tests =
       , "glue(x, y)" ]
       (any (BS.isInfixOf "x ## y") . outputLines)
 
+  -- A '#if' inside a multi-line pragma is a directive: cpp runs before the
+  -- lexer and does not know it is in one. vector-stream's Data.Stream.Monadic
+  -- puts one in the middle of a {-# RULES #-} block.
+  , hppPredHelper (haskellComments (add_definition "BITS" "64" emptyHppState))
+      [ "{-# RULES"
+      , "\"a\" f = g"
+      , "#if BITS > 32"
+      , "\"b\" f = h #-}"
+      , "#else"
+      , "\"c\" f = i #-}"
+      , "#endif" ]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "\"b\" f = h") ls
+                  && not (any (BS.isInfixOf "\"c\" f = i") ls)
+                  && not (any (BS.isInfixOf "#if") ls))
+
+  -- ... while the '#' that closes the pragma is still not one.
+  , hppPredHelper (haskellComments emptyHppState)
+      [ "{-# LANGUAGE CPP"
+      , "           , OverloadedStrings"
+      , "  #-}"
+      , "x = 1" ]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "#-}") ls && any (BS.isInfixOf "x = 1") ls)
+
   ]
 
 main :: IO ()

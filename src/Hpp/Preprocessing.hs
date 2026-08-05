@@ -211,9 +211,22 @@ cCommentRemoval' marker do_line_comments do_trigraphs =
 --       #-}
 --
 -- where the closing line begins with @#@ and would otherwise be dispatched as
--- a directive. 'gateHaskellComments' demotes the first token of a line that
--- starts inside a pragma, which stops the dispatch and leaves the rest of the
--- line expandable.
+-- a directive. 'gateHaskellComments' demotes that @#@, which stops the dispatch
+-- and leaves the rest of the line expandable.
+--
+-- Only that @#@, though: a directive inside a multi-line pragma is a directive.
+-- The preprocessor runs before the lexer and has no idea it is in one, so
+-- vector-stream's Data.Stream.Monadic
+--
+--     {-# RULES
+--     "enumFromTo<Int> [Stream]"
+--       enumFromTo = enumFromTo_int :: Monad m => Int -> Int -> Stream m Int
+--
+--     #if WORD_SIZE_IN_BITS > 32
+--     ...
+--
+-- expects its @#if@ to be taken, and demoting the leading @#@ of every
+-- continuation line left it in the output to be parsed as Haskell.
 
 -- | Lexical states tracked by 'gateHaskellComments'.
 data HsLex = HsCode
@@ -239,16 +252,21 @@ gateHaskellComments = go HsCode
           -- break, so any HsLineCmt state at end-of-line resets to
           -- HsCode for the following line.
           stNext = case stEnd of HsLineCmt -> HsCode; s -> s
-          -- See Note [A pragma is not a comment]: a continuation line of a
-          -- pragma must not have its leading '#' taken for a directive.
+          -- See Note [A pragma is not a comment]: the '#' that closes a
+          -- multi-line pragma must not be taken for a directive.
           ln'    = gateLeadingHash st (demoteTokens trace ln)
       in ln' : go stNext lns
 
     gateLeadingHash HsPragma ts = case break isImportant' ts of
-      (pre, Important t : rest) -> pre ++ Other t : rest
+      (pre, rest@(Important t : rest'))
+        | closesPragma rest -> pre ++ Other t : rest'
       _ -> ts
       where isImportant' (Important _) = True
             isImportant' _             = False
+            -- '#-}' and nothing else: anything else this line opens with is a
+            -- directive, and cpp runs before the lexer that would know it is
+            -- inside a pragma. See Note [A pragma is not a comment].
+            closesPragma = ("#-}" ==) . take 3 . toChars . detokenize
     gateLeadingHash _ ts = ts
 
     -- Walk the line's character stream, recording every state
