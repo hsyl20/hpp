@@ -105,8 +105,8 @@ dropOneLineBlockComments s =
           -- only add a space if we're not at the end of the line
           | otherwise    -> snoc pre ' ' <> dropOneLineBlockComments pos'
 
-removeMultilineComments :: Stringy s => Int -> [s] -> [s]
-removeMultilineComments !lineStart = goStart lineStart
+removeMultilineComments :: Stringy s => (Int -> s) -> Int -> [s] -> [s]
+removeMultilineComments marker !lineStart = goStart lineStart
   where goStart _ [] = []
         goStart !curLine (ln:lns) =
           case breakBlockCommentStart ln of
@@ -118,32 +118,36 @@ removeMultilineComments !lineStart = goStart lineStart
             Nothing -> goEnd (curLine+1) pre lns
             Just pos
               | sall isSpace (pre<>pos) ->
-                ("#line "<> fromString (show (curLine+1))) : goStart (curLine + 1) lns
+                marker (curLine+1) : goStart (curLine + 1) lns
               | otherwise -> (pre<>pos)
-                             : ("#line "<> fromString (show (curLine+1)))
+                             : marker (curLine+1)
                              : goStart (curLine+1) lns
 
 -- | Remove C-style comments bracketed by @/*@ and @*/@ and one-line '//'
 -- comments.
 cCommentRemoval :: Stringy s => [s] -> [s]
-cCommentRemoval = cCommentRemoval' True False
+cCommentRemoval = cCommentRemoval' cLineMarker True False
 
 -- | Remove C-style comments bracked by @/*@ and @*/@ and perform
 -- trigraph replacement.
 cCommentAndTrigraph :: Stringy s => [s] -> [s]
-cCommentAndTrigraph = cCommentRemoval' True True
+cCommentAndTrigraph = cCommentRemoval' cLineMarker True True
 
 -- | Remove C-style comments bracketed by @/*@ and @*/@ and one-line '//'
 -- comments, and optionally perform trigraph replacement.
-cCommentRemoval' :: Stringy s => Bool -> Bool -> [s] -> [s]
-cCommentRemoval' do_line_comments do_trigraphs =
+-- | A @#line@ marker, for the callers that have no 'Config' to ask.
+cLineMarker :: Stringy s => Int -> s
+cLineMarker ln = "#line " <> fromString (show ln)
+
+cCommentRemoval' :: Stringy s => (Int -> s) -> Bool -> Bool -> [s] -> [s]
+cCommentRemoval' marker do_line_comments do_trigraphs =
   -- important: drop '//' comments last, otherwise we would try to remove '//'
   -- comments into block comments. For example:
   --    <https://www.foo.org>. */
   --  would become
   --    <https:
   (if do_line_comments then map dropOneLineComments else id)
-  . removeMultilineComments 1
+  . removeMultilineComments marker 1
   . map dropOneLineBlockComments
   . (if do_trigraphs then map trigraphReplacement else id)
 
@@ -360,17 +364,21 @@ prepareInput =
   do cfg <- getL config <$> getState
      let gate | ignoreHaskellComments cfg = gateHaskellComments
               | otherwise                 = id
-     -- The two fast paths below bake in '//' removal, so they are only
-     -- applicable when it is wanted. See 'eraseCLineCommentsF'.
+     -- The two fast paths below bake in '//' removal and C-syntax line
+     -- markers, so they are only applicable when both are wanted. See
+     -- 'eraseCLineCommentsF' and Note [GHC syntax for line markers].
+     let c_markers = lineMarkerStyle cfg == CLineMarkers
      let cpp = if
           | eraseCComments cfg
           , eraseCLineComments cfg
+          , c_markers
           , spliceLongLines cfg
           , not (inhibitLinemarkers cfg)
           -> normalCPP
 
           | eraseCComments cfg
           , eraseCLineComments cfg
+          , c_markers
           , spliceLongLines cfg
           , not (replaceTrigraphs cfg)
           -> haskellCPP
@@ -412,6 +420,8 @@ genericConfig :: Config -> [String] -> [[TOKEN]]
 genericConfig cfg = map ((++ [Other "\n"]) . tokenize)
                   . (if spliceLongLines cfg then lineSplicing else id)
                   . (if eraseCComments cfg
-                       then cCommentRemoval' (eraseCLineComments cfg) False
+                       then cCommentRemoval'
+                              (fromString . lineMarker cfg)
+                              (eraseCLineComments cfg) False
                        else id)
                   . (if replaceTrigraphs cfg then map trigraphReplacement else id)

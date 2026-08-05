@@ -69,6 +69,10 @@ parseArgs cfg0 = go emptyEnv id cfg0 Nothing . concatMap breakEqs
                        , ["__STDC_VERSION__","=","199409L"] ]
                        -- , ["_POSIX_C_SOURCE","=","200112L"] ]
           in go env acc cfg' out (defs ++ rst)
+        -- See Note [GHC syntax for line markers] in "Hpp.Config".
+        go env acc cfg out ("--fhaskell-line-markers":rst) =
+          go env acc (cfg { lineMarkerStyleF = Just HaskellLineMarkers
+                          , inhibitLinemarkersF = Just False }) out rst
         go env acc cfg out ("--fline-splice":rst) =
           go env acc (cfg { spliceLongLinesF = Just True }) out rst
         go env acc cfg out ("--ferase-comments":rst) =

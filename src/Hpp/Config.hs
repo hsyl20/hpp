@@ -5,6 +5,29 @@ import Data.Functor.Identity
 import Data.Time.Clock (getCurrentTime, UTCTime)
 import Data.Time.Format
 
+-- | How a line marker is written into the output.
+--
+-- Note [GHC syntax for line markers]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- A preprocessor that removes or inserts lines has to tell whatever reads its
+-- output where the surviving lines came from, or every error location below the
+-- first @#include@ is wrong. C compilers are told with @#line@ directives.
+--
+-- Haskell has its own spelling -- @{-# LINE n \"file\" #-}@ -- and for a
+-- Haskell source it is the better one. It is a token, so it is accepted
+-- anywhere a pragma is rather than only at the start of a line; it carries the
+-- file name, which @#line@ as emitted here does not; and it needs no
+-- @-cpp@-specific lexer path to be understood.
+--
+-- Neither GNU cpp nor upstream hpp can emit it, because neither is expected to
+-- be preprocessing Haskell. Hpp is.
+data LineMarkerStyle
+  = CLineMarkers
+    -- ^ @#line n@, what a C compiler expects.
+  | HaskellLineMarkers
+    -- ^ @{-# LINE n \"file\" #-}@, what GHC expects.
+  deriving (Eq, Ord, Show)
+
 -- | A 'String' representing a time.
 newtype TimeString = TimeString { getTimeString :: String }
   deriving (Eq, Ord, Show)
@@ -48,7 +71,11 @@ data ConfigF f = Config { curFileNameF        :: f FilePath
                         -- have to go, because an @#include@ can bring
                         -- them into a Haskell buffer.
                         , inhibitLinemarkersF :: f Bool
-                        -- ^ Do not emit @#line@ directives.
+                        -- ^ Do not emit line markers at all.
+                        , lineMarkerStyleF    :: f LineMarkerStyle
+                        -- ^ How to write the line markers that are
+                        -- emitted. See Note [GHC syntax for line
+                        -- markers].
                         , replaceTrigraphsF   :: f Bool
                         -- ^ Replace trigraph sequences (each of which
                         -- starts with two consecutive question marks
@@ -88,13 +115,15 @@ realizeConfig (Config (Just fileName)
                       (Just comments)
                       (Just lineComments)
                       (Just inhibitLines)
+                      (Just markerStyle)
                       (Just trigraphs)
                       (Just pdate)
                       (Just ptime)
                       (Just ignoreUnknown)
                       (Just ignoreHsCmts)) =
   Just (Config (pure fileName) (pure paths) (pure spliceLines) (pure comments)
-               (pure lineComments) (pure inhibitLines) (pure trigraphs)
+               (pure lineComments) (pure inhibitLines) (pure markerStyle)
+               (pure trigraphs)
                (pure pdate) (pure ptime)
                (pure ignoreUnknown) (pure ignoreHsCmts))
 realizeConfig _ = Nothing
@@ -122,6 +151,25 @@ eraseCLineComments = runIdentity . eraseCLineCommentsF
 -- | Determine if generation of linemarkers should be inhibited.
 inhibitLinemarkers :: Config -> Bool
 inhibitLinemarkers = runIdentity . inhibitLinemarkersF
+
+-- | How line markers are written. See Note [GHC syntax for line markers].
+lineMarkerStyle :: Config -> LineMarkerStyle
+lineMarkerStyle = runIdentity . lineMarkerStyleF
+
+-- | A line marker for the given line of the file being processed, in the
+-- configured syntax. See Note [GHC syntax for line markers].
+lineMarker :: Config -> Int -> String
+lineMarker cfg ln = case lineMarkerStyle cfg of
+  CLineMarkers       -> "#line " ++ show ln
+  -- 'show' on the file name is what quotes and escapes it, which is exactly
+  -- what a LINE pragma wants.
+  HaskellLineMarkers -> "{-# LINE " ++ show ln ++ " "
+                          ++ show (curFileName cfg) ++ " #-}"
+
+-- | The prefixes a line marker can start with, for recognising one in the
+-- output stream.
+lineMarkerPrefixes :: [String]
+lineMarkerPrefixes = ["#line", "{-# LINE"]
 
 -- | Determine if trigraph sequences should be replaced.
 replaceTrigraphs :: Config -> Bool
@@ -151,7 +199,7 @@ ignoreHaskellComments = runIdentity . ignoreHaskellCommentsF
 defaultConfigF :: ConfigF Maybe
 defaultConfigF = Config Nothing (Just [])
                         (Just True) (Just True) (Just True) (Just False)
-                        (Just False)
+                        (Just CLineMarkers) (Just False)
                         (Just (DateString "??? ?? ????"))
                         (Just (TimeString "??:??:??"))
                         (Just False) (Just False)
@@ -190,6 +238,11 @@ eraseCCommentsL f cfg = (\x -> cfg { eraseCCommentsF = pure x })
 eraseCLineCommentsL :: Functor f => (Bool -> f Bool) -> Config -> f Config
 eraseCLineCommentsL f cfg = (\x -> cfg { eraseCLineCommentsF = pure x })
                             <$> f (eraseCLineComments cfg)
+
+lineMarkerStyleL :: Functor f
+                 => (LineMarkerStyle -> f LineMarkerStyle) -> Config -> f Config
+lineMarkerStyleL f cfg = (\x -> cfg { lineMarkerStyleF = pure x })
+                         <$> f (lineMarkerStyle cfg)
 
 -- | Lens for the "inhibit line markers" option. Option to disable the
 -- emission of #line pragmas in the output.

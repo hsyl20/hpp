@@ -5,21 +5,26 @@ module Hpp.Conditional (dropBranch, takeBranch) where
 import Data.Semigroup ((<>))
 #endif
 import Data.String (fromString)
+import Hpp.Config (Config, lineMarker)
 import Hpp.Parser (replace, awaitJust, Parser)
 import Hpp.Tokens (notImportant, Token(..))
-import Hpp.Types (lineNum, use, HasHppState, HasError, LineNum, TOKEN, String)
+import Hpp.Types
+  (config, getL, getState, lineNum, use, HasHppState, HasError, LineNum, TOKEN, String)
 import Prelude hiding (String)
 
--- | Emit a "#line ln" directive in the output stream
+-- | Emit a line marker in the output stream
 --
 -- In fact we emit:
---  - ["#line ln", "\n"] tokens which will be passed directly in the output stream
+--  - [marker, "\n"] tokens which will be passed directly in the output stream.
+--    Its syntax is the configured one -- see Note [GHC syntax for line markers]
+--    in "Hpp.Config" -- because this half is for whoever reads our output.
 --  - ["#", "line", "ln", "\n"] tokens which will be interpreted by HPP to set
 --  the correct line number and will not be reemitted in the output stream.
+--  That half is always a C directive, because HPP is the one reading it.
 --
-yieldLineNum :: LineNum -> [TOKEN]
-yieldLineNum !ln =
-  [ Important ("#line " <> fromString (show ln)), Other "\n"
+yieldLineNum :: Config -> LineNum -> [TOKEN]
+yieldLineNum cfg !ln =
+  [ Important (fromString (lineMarker cfg ln)), Other "\n"
   , Important "#", Important ("line"), Important (fromString (show ln)), Other "\n"
   ]
 
@@ -48,15 +53,15 @@ dropBranchFun = go (1::Int) 0
 
 -- | Take everything up to the end of this branch, drop all remaining
 -- branches (if any).
-takeBranch :: LineNum -> [[TOKEN]] -> [[TOKEN]]
-takeBranch n0 lns0 = yieldLineNum n0 : go (1::Int) n0 lns0
+takeBranch :: Config -> LineNum -> [[TOKEN]] -> [[TOKEN]]
+takeBranch cfg n0 lns0 = yieldLineNum cfg n0 : go (1::Int) n0 lns0
   where go _ _ [] = [] -- error: unterminated conditional
         go !nesting !n (ln:lns) =
           case getCmd ln of
             Just cmd
               | cmd `elem` ["if","ifdef","ifndef"] ->
                 ln : go (nesting+1) (n+1) lns
-              | nesting == 1 && cmd == "endif" -> yieldLineNum (n+1) : lns
+              | nesting == 1 && cmd == "endif" -> yieldLineNum cfg (n+1) : lns
               | cmd == "endif" -> ln : go (nesting - 1) (n + 1) lns
               | nesting == 1 && cmd `elem` ["else","elif"] ->
                 let (numSkipped, lns') = dropBranchFun lns
@@ -67,9 +72,10 @@ takeBranch n0 lns0 = yieldLineNum n0 : go (1::Int) n0 lns0
 -- 'LineNum' by the number of lines skipped.
 dropBranch :: (HasError m, HasHppState m, Monad m) => Parser m [TOKEN] ()
 dropBranch = do ln <- use lineNum
+                cfg <- getL config <$> getState
                 (el, numSkipped) <- dropBranchAux
                 let ln' = ln + numSkipped
-                replace (yieldLineNum ln')
+                replace (yieldLineNum cfg ln')
                 mapM_ replace el
 
 -- | Skip to the end of a conditional branch. Returns the 'Just' the

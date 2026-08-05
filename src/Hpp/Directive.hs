@@ -134,7 +134,8 @@ directive = lift (onElements (awaitJust "directive")) >>= aux
                      Nothing ->
                        lift dropBranch
                      Just _ ->
-                       lift (onInputSegment (takeBranch ln)) -- (takeBranch ln >>= precede)
+                       do { cfg <- getL config <$> getState
+                          ; lift (onInputSegment (takeBranch cfg ln)) } -- (takeBranch ln >>= precede)
                  _ -> throwError . UnknownCommand ln $
                       "ifdef "++ toChars (detokenize toks)
                return True
@@ -144,7 +145,8 @@ directive = lift (onElements (awaitJust "directive")) >>= aux
                case takeWhile isImportant toks of
                  [Important t] ->
                    lookupMacro t >>= \case
-                      Nothing -> lift (onInputSegment (takeBranch ln)) -- takeBranch ln >>= precede)
+                      Nothing -> do { cfg <- getL config <$> getState
+                          ; lift (onInputSegment (takeBranch cfg ln)) } -- takeBranch ln >>= precede)
                       Just _ -> lift dropBranch
                  _ -> throwError . UnknownCommand ln $
                       "ifndef "++ toChars (detokenize toks)
@@ -221,7 +223,8 @@ directive = lift (onElements (awaitJust "directive")) >>= aux
              let res = evalExpr <$> parseExpr (map (fmap toChars) ex)
              lineNum .= ln
              if maybe False (/= 0) res
-               then lift (onInputSegment (takeBranch ln)) -- (takeBranch ln >>= precede)
+               then do { cfg <- getL config <$> getState
+                          ; lift (onInputSegment (takeBranch cfg ln)) } -- (takeBranch ln >>= precede)
                else lift dropBranch
 {-# SPECIALIZE directive ::
     HppT [String] (Parser (StateT HppState (ExceptT Error IO)) [TOKEN]) Bool #-}

@@ -11,10 +11,13 @@ import Control.Monad.Trans.Except
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, State)
 import Data.IORef
-import Hpp.Config (Config, curFileNameF, curFileName, includePaths, inhibitLinemarkers)
+import Hpp.Config
+  ( Config, curFileNameF, curFileName, includePaths, inhibitLinemarkers
+  , lineMarkerPrefixes )
 import Hpp.Directive (macroExpansion)
 import Hpp.Parser (Parser, precede, evalParse)
 import Hpp.Preprocessing
+import Data.String (fromString)
 import Hpp.StringSig
 import Hpp.String (stripAngleBrackets)
 import Hpp.Tokens (detokenize)
@@ -203,8 +206,11 @@ preprocess src =
      let prepOutput = if inhibitLinemarkers cfg then aux else pure
      lift (precede (prep src))
      parseStreamHpp (fmap (prepOutput . detokenize) <$> macroExpansion)
-  where aux xs | sIsPrefixOf "#line" xs = []
+  where aux xs | any (`sIsPrefixOf` xs) markers = []
                | otherwise = [xs]
+        -- Either syntax, because either may have been emitted. See Note [GHC
+        -- syntax for line markers] in "Hpp.Config".
+        markers = map fromString lineMarkerPrefixes
 
 -- Note: `preprocess` is the workhorse of the library. We run the
 -- value it returns in `hppIO'` by interleaving interpretation of
