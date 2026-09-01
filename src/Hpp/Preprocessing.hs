@@ -297,6 +297,9 @@ gateHaskellComments :: [[TOKEN]] -> [[TOKEN]]
 gateHaskellComments = go HsCode
   where
     go _ []         = []
+    -- See Note [A directive line is not Haskell].
+    go st (ln:lns)
+      | HsCode <- st, startsDirective ln = ln : go st lns
     go st (ln:lns)  =
       let chars  = toChars (detokenize ln)
           trace  = walkTraced st chars
@@ -323,6 +326,27 @@ gateHaskellComments = go HsCode
             -- inside a pragma. See Note [A pragma is not a comment].
             closesPragma = ("#-}" ==) . take 3 . toChars . detokenize
     gateLeadingHash _ ts = ts
+
+    -- Note [A directive line is not Haskell]
+    -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    -- A line the dispatcher will take as a directive is the preprocessor's,
+    -- not the lexer's, and it has no Haskell comments in it. happy's template
+    -- writes
+    --
+    --     #  define DEBUG_TRACE(s)    {- nothing -}
+    --
+    -- and gating that line demotes everything from @{-@ onwards, so
+    -- 'parseDefinition' trims the demoted tail away and the macro expands to a
+    -- bare @{-@: every parser happy generates then fails to lex.
+    --
+    -- So a directive line found in code is passed through whole, and the
+    -- lexical state does not advance across it. A directive line found inside
+    -- a comment is still gated -- that is what the gate is for.
+    startsDirective ts = case dropWhile notImp ts of
+      (Important "#" : _) -> True
+      _                   -> False
+      where notImp (Important _) = False
+            notImp _             = True
 
     -- Walk the line's character stream, recording every state
     -- transition as @(positionAfter, newState)@. The list always

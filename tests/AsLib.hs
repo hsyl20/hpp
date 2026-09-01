@@ -879,6 +879,31 @@ tests =
       (\out -> let ls = outputLines out
                in any (BS.isInfixOf "#-}") ls && any (BS.isInfixOf "x = 1") ls)
 
+  -- A '#define' line is the preprocessor's, not the lexer's: a '{-' in the
+  -- body opens no comment. happy's template defines DEBUG_TRACE this way, so
+  -- every parser it generates depends on it.
+  , hppPredHelper (haskellComments emptyHppState)
+      [ "#define TRACE(s) {- nothing -}"
+      , "f = TRACE(\"x\") g" ]
+      (any (BS.isInfixOf "f = {- nothing -} g") . outputLines)
+
+  -- ... a '--' body is the same question.
+  , hppPredHelper (haskellComments emptyHppState)
+      [ "#define DASHES -- text"
+      , "f = DASHES" ]
+      (any (BS.isInfixOf "-- text") . outputLines)
+
+  -- ... and a real comment in code still hides the directive inside it, which
+  -- is what the gate is for.
+  , hppPredHelper (haskellComments emptyHppState)
+      [ "x = 1 {- open"
+      , "#define HIDDEN 2"
+      , "close -}"
+      , "y = HIDDEN" ]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "#define HIDDEN 2") ls
+                  && any (BS.isInfixOf "y = HIDDEN") ls)
+
   ]
 
 main :: IO ()
