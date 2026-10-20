@@ -155,15 +155,24 @@ expandFunction name variadic arity f mkErr expand =
   do margs <- appParse
      case margs of
        Nothing -> return Nothing
-       Just args
+       Just args0
+         -- C99 6.10.3p4: when a macro has exactly one parameter, @M()@ is
+         -- an application to one argument that is empty, not to none.
+         -- GHC's own sources rely on it: @REG()@ in a comment of
+         -- compiler/CodeGen.Platform.h, where REG takes one parameter.
          | NotVariadic <- variadic
-         , length args /= arity
-         -> mkErr $ map (detokenize . mapMaybe unscan) args
-
-         | otherwise ->
-           do args' <- mapM expand args
-              let raw = map (detokenize . mapMaybe unscan) args
-              return . Just $ Mask name : f (zip args' raw) ++ [Unmask name]
+         , arity == 1
+         , null args0
+         -> expandWith [[]]
+         | NotVariadic <- variadic
+         , length args0 /= arity
+         -> mkErr $ map (detokenize . mapMaybe unscan) args0
+         | otherwise -> expandWith args0
+  where
+    expandWith args =
+      do args' <- mapM expand args
+         let raw = map (detokenize . mapMaybe unscan) args
+         return . Just $ Mask name : f (zip args' raw) ++ [Unmask name]
 
 -- lookupEnv :: (Monad m, HasEnv m)
 --           => String -> ParserT m src Scan (Maybe Macro)

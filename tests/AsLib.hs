@@ -159,6 +159,28 @@ tests =
   [ hppHelper (remove_line emptyHppState)
       sourceIfdef ["x = 99\n","\n"]
 
+    -- C99 6.10.3p4: a macro with exactly one parameter applied to @()@ gets
+    -- one argument, which is empty. GHC's own sources rely on it, in a
+    -- comment of compiler/CodeGen.Platform.h that reads @REG() macro@ after
+    -- @#define REG(x) __asm__("%" #x)@, and GHC's cpp accepts it.
+  , hppHelper (remove_line emptyHppState)
+      [ "#define ONE(x) [x]"
+      , "a = ONE()"
+      , "b = ONE(1)"
+      ]
+      [ "a = []\n"
+      , "b = [1]\n"
+      , "\n"
+      ]
+
+    -- A macro with two parameters applied to @()@ is still an error: one
+    -- empty argument is not two.
+  , not <$> hppHelper (remove_line emptyHppState)
+      [ "#define TWO(x,y) [x,y]"
+      , "a = TWO()"
+      ]
+      [ "a = []\n", "\n" ]
+
   , hppHelper (remove_line $ add_definition "FOO" "1" emptyHppState)
       sourceIfdef ["x = 42\n","\n"]
 
