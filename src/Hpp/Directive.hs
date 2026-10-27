@@ -7,6 +7,7 @@ import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.State.Strict (StateT)
+import qualified Data.HashSet as HashSet
 import Hpp.Conditional (dropBranch, takeBranch, yieldLineNum)
 import Hpp.Config (Config, curFileName, curFileNameF, ignoreUnknownDirectives,
                    traditionalMacros)
@@ -126,7 +127,15 @@ directive :: forall m. (Monad m, HasError m, HasHppState m, HasEnv m)
 directive = lift (onElements (awaitJust "directive")) >>= aux
   where aux :: TOKEN -> HppT [String] (Parser m [TOKEN]) Bool
         aux (Important cmd) = case cmd of
-          "pragma" -> True <$ lift dropLine -- Ignored
+          -- See Note [#pragma once] in Hpp.Types. Other pragmas are ignored.
+          "pragma" -> do
+            toks <- lift (onElements droppingSpaces >> takeLine)
+            case filter isImportant toks of
+              [Important "once"] -> do
+                cur <- curFileName <$> use config
+                onceFiles %= HashSet.insert (onceKey cur)
+              _ -> pure ()
+            return True
           "define" -> True <$
                       (lift $ do
                         style <- macroStyle <$> use config
@@ -247,9 +256,12 @@ directive = lift (onElements (awaitJust "directive")) >>= aux
              let fileName = toChars (detokenize (trimUnimportant finalToks))
              -- See Note [Preparing a file names that file] in Hpp.Preprocessing.
              (resolvedPath, content) <- readFun ln fileName
-             prep <- prepareInputFor resolvedPath
-             let src = prep content
-             lift (streamNewFile resolvedPath src)
+             -- See Note [#pragma once] in Hpp.Types.
+             once <- use onceFiles
+             unless (HashSet.member (onceKey resolvedPath) once) $ do
+               prep <- prepareInputFor resolvedPath
+               let src = prep content
+               lift (streamNewFile resolvedPath src)
         {- SPECIALIZE includeAux ::
             (LineNum -> FilePath -> HppT [String] (Parser (StateT HppState (ExceptT Error IO)) [TOKEN]) (FilePath, [String]))
             -> HppT [String] (Parser (StateT HppState (ExceptT Error IO)) [TOKEN]) () #-}

@@ -443,6 +443,26 @@ tests =
         ["#include <stg/MachRegsForHost.h>"]
         (any (BS.isInfixOf "deep_marker"))
 
+  -- #pragma once: a header is read at most once, even when headers
+  -- include each other. bionic (Android) guards its headers with the
+  -- pragma only, and sys/cdefs.h, android/versioning.h and
+  -- android/api-level.h form a cycle, so without it the include never
+  -- ends. The fixture in tests/include-data is:
+  --
+  --   once/a.h  -- #pragma once, #include "b.h", a_marker
+  --   once/b.h  -- #pragma once, #include "a.h", b_marker
+  --
+  -- The second include names a.h through a "dir/.." path, which is
+  -- the same file. See Note [#pragma once] in Hpp.Types.
+  , withCurrentDirectory "tests/include-data" $
+      hppFileHelper
+        (remove_line emptyHppState)
+        [ "#include \"once/a.h\""
+        , "#include \"sub/../once/a.h\""
+        , "#include \"once/b.h\""
+        ]
+        (\out -> count "a_marker" out == 1 && count "b_marker" out == 1)
+
   -- C99 §6.10.2: macros must NOT be expanded inside `<...>` or
   -- `"..."` include arguments. Real-world trigger: glibc's
   -- <errno.h> installs `#define errno (*__errno_location ())`,
@@ -927,6 +947,10 @@ tests =
                   && any (BS.isInfixOf "y = HIDDEN") ls)
 
   ]
+
+-- | How many output lines contain the text.
+count :: ByteString -> [ByteString] -> Int
+count t = length . filter (BS.isInfixOf t)
 
 main :: IO ()
 main = do results <- sequenceA tests

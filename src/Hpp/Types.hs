@@ -12,13 +12,15 @@ import Data.Functor.Constant
 import Data.Functor.Identity
 -- import qualified Data.Map as M
 import Data.HashMap.Strict (HashMap)
+import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
 import Hpp.Config
 import Hpp.Env (emptyEnv, lookupKey)
 import Hpp.StringSig (toChars)
 import Hpp.Tokens
 import Prelude hiding (String)
 import qualified Prelude as P
-import System.FilePath (takeDirectory)
+import System.FilePath (joinPath, splitDirectories, takeDirectory)
 
 -- | Line numbers are represented as 'Int's
 type LineNum = Int
@@ -93,6 +95,9 @@ data HppState = HppState { hppConfig :: Config
                            -- ^ Current line number of input file
                          , hppEnv :: Env
                            -- ^ Preprocessor binding environment
+                         , hppOnceFiles :: HashSet FilePath
+                           -- ^ Files that said @#pragma once@, as
+                           -- 'onceKey's. See Note [#pragma once].
                          }
   deriving Show
 
@@ -288,25 +293,56 @@ over l f = runIdentity . l (Identity . f)
 -- * State Lenses
 
 emptyHppState :: Config -> HppState
-emptyHppState cfg = HppState cfg (takeDirectory (curFileName cfg)) 1 emptyEnv
+emptyHppState cfg =
+  HppState cfg (takeDirectory (curFileName cfg)) 1 emptyEnv HashSet.empty
 
 config :: Lens HppState Config
-config f (HppState cfg _dir ln e) =
-  (\cfg' -> HppState cfg' (takeDirectory (curFileName cfg')) ln e) <$> f cfg
+config f st =
+  (\cfg' -> st { hppConfig = cfg', hppCurDir = takeDirectory (curFileName cfg') })
+    <$> f (hppConfig st)
 {-# INLINE config #-}
 
 dir :: Lens HppState FilePath
-dir f (HppState cfg dirOld ln e) =
-  (\dirNew -> HppState cfg dirNew ln e) <$> f dirOld
+dir f st = (\dirNew -> st { hppCurDir = dirNew }) <$> f (hppCurDir st)
 {-# INLINE dir #-}
 
 lineNum :: Lens HppState LineNum
-lineNum f (HppState cfg dir0 ln e) = (\ln' -> HppState cfg dir0 ln' e) <$> f ln
+lineNum f st = (\ln' -> st { hppLineNum = ln' }) <$> f (hppLineNum st)
 {-# INLINE lineNum #-}
 
 env :: Lens HppState Env
-env f (HppState cfg dir0 ln e) = (\e' -> HppState cfg dir0 ln e') <$> f e
+env f st = (\e' -> st { hppEnv = e' }) <$> f (hppEnv st)
 {-# INLINE env #-}
+
+onceFiles :: Lens HppState (HashSet FilePath)
+onceFiles f st = (\o -> st { hppOnceFiles = o }) <$> f (hppOnceFiles st)
+{-# INLINE onceFiles #-}
+
+-- Note [#pragma once]
+-- ~~~~~~~~~~~~~~~~~~~
+-- A header that says @#pragma once@ is read at most once per run: a later
+-- @#include@ of the same file is ignored, as if the file were empty. GCC,
+-- clang and MSVC all do this. Some libcs guard their headers with the pragma
+-- only, and their headers include each other. bionic (Android) has
+--
+--     sys/cdefs.h -> android/versioning.h -> android/api-level.h -> sys/cdefs.h
+--
+-- so without the pragma the include never ends and memory fills.
+--
+-- A file is known by 'onceKey' of its resolved path: the path with each
+-- @dir/..@ removed. So @bin/../include/a.h@ and @include/a.h@ are one file.
+-- Two paths that reach one file through a symbolic link are two files; C
+-- compilers compare the inode, which a pure preprocessor cannot read.
+
+-- | The name of a file in 'hppOnceFiles'. See Note [#pragma once].
+onceKey :: FilePath -> FilePath
+onceKey = joinPath . go [] . splitDirectories
+  where
+    go acc [] = reverse acc
+    go acc (".":rest) = go acc rest
+    go (a:acc) ("..":rest)
+      | a /= "..", a /= "/" = go acc rest
+    go acc (p:rest) = go (p:acc) rest
 
 use :: (HasHppState m, Functor m) => Lens HppState a -> m a
 use l = getL l <$> getState
