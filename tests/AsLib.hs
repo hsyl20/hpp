@@ -894,6 +894,30 @@ tests =
                   && not (any (BS.isInfixOf "\"c\" f = i") ls)
                   && not (any (BS.isInfixOf "#if") ls))
 
+  -- A '/*' inside a '//' comment opens nothing: the line comment got there
+  -- first. The Windows SDK's pdhmsg.h opens with such a banner, and read as
+  -- a block comment it ran to the end of the file. See Note [A line comment
+  -- hides a block comment opener] in Hpp.Preprocessing.
+  , hppPredHelper (remove_comments (remove_line emptyHppState))
+      [ "//***********************"
+      , "int kept = 1;"
+      , "// a /* in a line comment"
+      , "int alsokept = 2; /* gone */ int third = 3;" ]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "int kept = 1;") ls
+                  && any (BS.isInfixOf "int alsokept = 2;") ls
+                  && any (BS.isInfixOf "int third = 3;") ls
+                  && not (any (BS.isInfixOf "gone") ls))
+
+  -- But in the traditional mode // is not a comment, and the opener after
+  -- it is one.
+  , hppPredHelper (no_line_comments (remove_line emptyHppState))
+      [ "a // b /* gone"
+      , "still gone */ int kept = 1;" ]
+      (\out -> let ls = outputLines out
+               in any (BS.isInfixOf "int kept = 1;") ls
+                  && not (any (BS.isInfixOf "gone") ls))
+
   -- A '"' between two "'"s is a character, not the start of a string, so the
   -- '/*' in the string that follows it is still inside one and is not a
   -- comment. hpp's own Hpp.Preprocessing has the line.

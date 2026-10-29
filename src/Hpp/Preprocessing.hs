@@ -107,19 +107,55 @@ quotedQuote pre pos = closes && opens
         _              -> False
       _ -> False
 
-breakBlockCommentStart :: Stringy s => s -> Maybe (s, s)
-breakBlockCommentStart s =
-  case breakCharOrSub '"' "/*" s of
+-- Note [A line comment hides a block comment opener]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Line comments are erased last (see 'cCommentRemoval''), so when the block
+-- comment scanners run, a @//@ comment is still on the line. A block comment
+-- opener inside one is not an opener in C: the line comment got there
+-- first. Read as one, it opens a block comment that swallows everything to
+-- the next closer, lines or files away, or to the end of the file: the
+-- "Unmatched" error.
+--
+-- The Windows SDK is where it bites: pdhmsg.h, winmeta.h and ncrypt.h open
+-- with a banner line of two slashes followed by a row of stars, whose
+-- second and third characters are a slash and a star.
+--
+-- So the scanners stop at the first @//@ outside a string literal, where
+-- line comments are being erased at all. In the traditional mode @//@ is
+-- not a comment and does not stop them, as before.
+--
+-- (This file goes through GHC's cpp, which erases C comments: this note
+-- spells no opener or closer for that reason.)
+
+-- | Where the next @/@ outside a string literal is: the text before it and
+-- the text from it on. See Note [A quote can be a character] for the
+-- literals.
+breakSlash :: Stringy s => s -> Maybe (s, s)
+breakSlash s =
+  case breakCharOrSub '"' "/" s of
     NoMatch -> Nothing
-    -- See Note [A quote can be a character].
     CharMatch pre pos
       | quotedQuote pre pos
       , Just (q, rest) <- uncons pos
-      -> first ((snoc (snoc pre '"') q) <>) <$> breakBlockCommentStart rest
+      -> first ((snoc (snoc pre '"') q) <>) <$> breakSlash rest
     CharMatch pre pos -> let (lit, rest) = skipLiteral pos
-                         in first ((snoc pre '"' <> lit) <>) <$>
-                            breakBlockCommentStart rest
-    SubMatch pre pos -> Just (pre, pos)
+                         in first ((snoc pre '"' <> lit) <>) <$> breakSlash rest
+    -- 'breakCharOrSub' hands back the text after the match; the slash
+    -- goes back on, so that the callers read the two characters.
+    SubMatch pre pos -> Just (pre, cons '/' pos)
+
+-- | The text before a block comment opener and the text from it on, or
+-- 'Nothing' where the line has none before a line comment. See Note [A
+-- line comment hides a block comment opener].
+breakBlockCommentStart :: Stringy s => Bool -> s -> Maybe (s, s)
+breakBlockCommentStart line_comments s =
+  case breakSlash s of
+    Nothing -> Nothing
+    Just (pre, pos)
+      | "/*" `sIsPrefixOf` pos -> Just (pre, pos)
+      | line_comments, "//" `sIsPrefixOf` pos -> Nothing
+      | otherwise ->
+          first ((snoc pre '/') <>) <$> breakBlockCommentStart line_comments (sdrop 1 pos)
 
 breakBlockCommentEnd :: Stringy s => s -> Maybe s
 breakBlockCommentEnd s =
@@ -141,31 +177,29 @@ dropOneLineComments s =
       in snoc pre '"' <> lit <> dropOneLineComments rest
     SubMatch pre _pos -> pre
 
-dropOneLineBlockComments :: Stringy s => s -> s
-dropOneLineBlockComments s =
-  case breakCharOrSub '"' "/*" s of
-    NoMatch -> s
-    -- See Note [A quote can be a character].
-    CharMatch pre pos
-      | quotedQuote pre pos
-      , Just (q, rest) <- uncons pos
-      -> snoc (snoc pre '"') q <> dropOneLineBlockComments rest
-    CharMatch pre pos ->
-      let (lit,rest) = skipLiteral pos
-      in snoc pre '"' <> lit <> dropOneLineBlockComments rest
-    SubMatch pre pos ->
-      case breakOn [("*/", ())] pos of
-        Nothing -> pre <> "/*" <> pos
-        Just (_,_,pos')
-          | isEmpty pos' -> pre
-          -- only add a space if we're not at the end of the line
-          | otherwise    -> snoc pre ' ' <> dropOneLineBlockComments pos'
+-- | A line with its one-line block comments erased, up to a line comment
+-- where those count. See Note [A line comment hides a block comment opener].
+dropOneLineBlockComments :: Stringy s => Bool -> s -> s
+dropOneLineBlockComments line_comments s =
+  case breakSlash s of
+    Nothing -> s
+    Just (pre, pos)
+      | line_comments, "//" `sIsPrefixOf` pos -> pre <> pos
+      | not ("/*" `sIsPrefixOf` pos) ->
+          snoc pre '/' <> dropOneLineBlockComments line_comments (sdrop 1 pos)
+      | otherwise ->
+          case breakOn [("*/", ())] (sdrop 2 pos) of
+            Nothing -> pre <> pos
+            Just (_,_,pos')
+              | isEmpty pos' -> pre
+              -- only add a space if we're not at the end of the line
+              | otherwise    -> snoc pre ' ' <> dropOneLineBlockComments line_comments pos'
 
-removeMultilineComments :: Stringy s => (Int -> s) -> Int -> [s] -> [s]
-removeMultilineComments marker !lineStart = goStart lineStart
+removeMultilineComments :: Stringy s => (Int -> s) -> Bool -> Int -> [s] -> [s]
+removeMultilineComments marker line_comments !lineStart = goStart lineStart
   where goStart _ [] = []
         goStart !curLine (ln:lns) =
-          case breakBlockCommentStart ln of
+          case breakBlockCommentStart line_comments ln of
             Nothing -> ln : goStart (curLine+1) lns
             Just (pre,_) -> goEnd (curLine+1) pre lns
         goEnd _ _ [] = error "Unmatched /*"
@@ -203,8 +237,8 @@ cCommentRemoval' marker do_line_comments do_trigraphs =
   --  would become
   --    <https:
   (if do_line_comments then map dropOneLineComments else id)
-  . removeMultilineComments marker 1
-  . map dropOneLineBlockComments
+  . removeMultilineComments marker do_line_comments 1
+  . map (dropOneLineBlockComments do_line_comments)
   . (if do_trigraphs then map trigraphReplacement else id)
 
 -- * Haskell comments
